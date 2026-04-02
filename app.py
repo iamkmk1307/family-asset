@@ -113,4 +113,7 @@ sim_col1, sim_col2 = st.columns([1, 2])
 
 with sim_col1:
     st.write("**예상 연평균 수익률 조정**")
-    rate_qqq = st.slider("ProShares QQQ 2
+    rate_qqq = st.slider("ProShares QQQ 2X (%)", 0, 50, 15)
+    rate_btc = st.slider("비트코인 (%)", 0, 100, 30)
+    rate_eth = st.slider("이더리움 (%)", 0, 100, 30)
+    rate_schd = st.slider("TIGER 미국배당다우존스 (%)", 0, 30, 8)
