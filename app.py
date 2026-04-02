@@ -40,7 +40,7 @@ with st.spinner("🔄 실시간 시세 및 환율을 불러오는 중입니다..
     # 데이터 청소
     cols_to_fix = ['보유수량', '매수단가', '투입원금(KRW)']
     for col in cols_to_fix:
-        df[col] = pd.to_numeric(df[col].str.replace(',', '').str.strip(), errors='coerce').fillna(0)
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0)
 
     # 환율 및 실시간 시세 수집
     usd_krw_rate = yf.Ticker("KRW=X").history(period="1d")["Close"].iloc[-1]
