@@ -15,29 +15,27 @@ st.title("👨‍👩‍👧 우리 가족 통합 자산 대시보드")
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 2. 구글 API 연결 (Streamlit 보안 비밀고 사용)
+# 2. 구글 API 연결 및 데이터 수집 (1분마다 자동 새로고침!)
 # ---------------------------------------------------------
-# 주의: 로컬 코랩과 달리, 웹에서는 st.secrets 기능을 통해 안전하게 JSON 키를 읽어옵니다.
-@st.cache_resource
-def get_google_sheet():
+@st.cache_data(ttl=60) # 💡 핵심: 60초마다 구글 시트의 새로운 데이터를 가져옵니다.
+def load_data():
     scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-    # 스트림릿 비밀금고에서 JSON 텍스트를 읽어와서 파이썬 딕셔너리로 변환합니다.
     secret_dict = json.loads(st.secrets["GCP_JSON"]) 
     credentials = Credentials.from_service_account_info(secret_dict, scopes=scope)
     gc = gspread.authorize(credentials)
     
-    # 트레이더님의 구글 시트 고유 키
-    sheet_url_key = "12hQFqNwUUqPr1Fhlqp5hT0nwhGKLI3mfGM0qBr0NM_w" 
+    # 트레이더님의 구글 시트 주소
+    sheet_url_key = "12hQFqNwUUqPr1Fhlqp5hT0nwhGKLI3mfGM0qBr0NM_w"
     
     worksheet = gc.open_by_key(sheet_url_key).sheet1
     rows = worksheet.get_all_values()
     df = pd.DataFrame(rows[1:], columns=rows[0])
     return df
 
-with st.spinner("🔄 실시간 시세 및 환율을 불러오는 중입니다..."):
-    df = get_google_sheet()
+with st.spinner("🔄 구글 시트 및 실시간 시세를 불러오는 중입니다..."):
+    df = load_data()
 
-    # 데이터 청소
+    # 데이터 청소 (이전의 에러를 완벽히 해결한 astype(str) 적용)
     cols_to_fix = ['보유수량', '매수단가', '투입원금(KRW)']
     for col in cols_to_fix:
         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0)
@@ -75,45 +73,106 @@ total_rate = (total_profit / total_principal) * 100 if total_principal > 0 else 
 target_amount = 600000000
 achievement_rate = (total_current / target_amount) * 100
 
-# st.columns로 화면을 3칸으로 나누어 깔끔하게 배치합니다.
 col1, col2, col3 = st.columns(3)
 col1.metric(label="💰 총 투입 원금", value=f"{total_principal:,.0f}원")
 col2.metric(label="📈 현재 총 자산", value=f"{total_current:,.0f}원", delta=f"{total_profit:+,.0f}원 ({total_rate:+.2f}%)")
-col3.metric(label="🎯 6억 목표 달성률", value=f"{achievement_rate:.1f}%", delta=f"남은 금액: {target_amount - total_current:,.0f}원", delta_color="off")
-
+col3.metric(label="🎯 6억 목표 달성률 (2027년 연말)", value=f"{achievement_rate:.1f}%", delta=f"남은 금액: {target_amount - total_current:,.0f}원", delta_color="off")
 st.markdown(f"*🔎 적용 환율: 1달러 = {usd_krw_rate:,.2f}원*")
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. 자산 비중 그래프 (단일 도넛 차트)
+# 4. ⭐️ 요청하신 '한눈에 보는 상세 표' (총합 포함)
 # ---------------------------------------------------------
-st.subheader("📊 자산 카테고리 비중")
-family_portfolio = df.groupby('대분류')['현재평가금액(KRW)'].sum().reset_index().sort_values(by='현재평가금액(KRW)', ascending=False)
+st.subheader("📋 종목별 상세 현황")
 
-fig = go.Figure(data=[go.Pie(
-    labels=family_portfolio['대분류'], values=family_portfolio['현재평가금액(KRW)'], 
-    hole=0.4, textinfo='percent+label', textfont=dict(size=15),
-    marker=dict(colors=['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3'])
-)])
-fig.update_layout(hoverlabel=dict(bgcolor="white", font_size=16), showlegend=True)
-fig.update_traces(hovertemplate='<b>%{label}</b><br>평가금액: %{value:,.0f}원<br>비중: %{percent}')
+# 출력용 데이터프레임 조립
+display_df = df[['소유자', '자산/종목명', '투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']].copy()
+display_df['수익률(%)'] = np.where(display_df['투입원금(KRW)'] > 0, (display_df['수익금(KRW)'] / display_df['투입원금(KRW)']) * 100, 0)
 
-# 스트림릿 전용 그래프 출력 명령어
-st.plotly_chart(fig, use_container_width=True)
+# 총합 행 생성 및 병합
+total_row = pd.DataFrame({
+    '소유자': ['🔥총합🔥'], '자산/종목명': ['전체 자산'], '투입원금(KRW)': [total_principal], 
+    '현재평가금액(KRW)': [total_current], '수익금(KRW)': [total_profit], '수익률(%)': [total_rate]
+})
+display_df = pd.concat([display_df, total_row], ignore_index=True)
 
+# 금액 포맷팅 (웹에 예쁘게 보이도록)
+for col in ['투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']:
+    display_df[col] = display_df[col].map('{:,.0f}'.format)
+display_df['수익률(%)'] = display_df['수익률(%)'].map('{:+.2f}%'.format)
+
+# 웹에 표 출력
+st.dataframe(display_df, use_container_width=True, hide_index=True)
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 5. 인터랙티브 5억 달성 시뮬레이터
+# 5. 🔮 인터랙티브 복리 시뮬레이터 (직접 입력 방식)
 # ---------------------------------------------------------
-st.subheader("🔮 2027년 내 집 마련 시뮬레이터 (마우스로 조절해보세요!)")
+st.subheader("🔮 2027년 내 집 마련 시뮬레이터")
+st.write("💡 **아래 표의 '월 적립금'과 '연 수익률' 칸을 더블클릭해서 자유롭게 숫자를 바꿔보세요!** 21개월(2027년 연말) 후의 최종 자산이 실시간으로 계산됩니다.")
 
-# 화면을 두 칸으로 나누어 왼쪽은 슬라이더, 오른쪽은 결과 표를 보여줍니다.
-sim_col1, sim_col2 = st.columns([1, 2])
+# 현재 보유 자산을 종목명 기준으로 합산
+current_assets = df.groupby('자산/종목명')['현재평가금액(KRW)'].sum()
 
-with sim_col1:
-    st.write("**예상 연평균 수익률 조정**")
-    rate_qqq = st.slider("ProShares QQQ 2X (%)", 0, 50, 15)
-    rate_btc = st.slider("비트코인 (%)", 0, 100, 30)
-    rate_eth = st.slider("이더리움 (%)", 0, 100, 30)
-    rate_schd = st.slider("TIGER 미국배당다우존스 (%)", 0, 30, 8)
+# 초기 세팅값 (트레이더님의 평소 투자 계획)
+default_pmt = {'ProShares QQQ 2X': 1000000, '비트코인': 600000, '이더리움': 400000, 'TIGER 미국배당다우존스': 1000000, '오클로': 180000, '프리포트 맥모란': 300000, 'Uranium ETF': 250000, '금': 450000}
+default_rate = {'ProShares QQQ 2X': 15.0, '비트코인': 30.0, '이더리움': 30.0, 'TIGER 미국배당다우존스': 8.0, '오클로': 20.0, '프리포트 맥모란': 12.0, 'Uranium ETF': 15.0, '금': 5.0}
+
+# 시뮬레이션 입력 표 만들기
+sim_data = []
+for asset, val in current_assets.items():
+    sim_data.append({
+        '자산/종목명': asset,
+        '현재 자산(원)': val,
+        '월 적립금(수정가능)': default_pmt.get(asset, 0),
+        '연 수익률(%)(수정가능)': default_rate.get(asset, 0.0)
+    })
+sim_input_df = pd.DataFrame(sim_data)
+
+# ⭐️ 사용자가 웹에서 직접 표의 숫자를 고칠 수 있게 해주는 마법의 기능!
+edited_df = st.data_editor(
+    sim_input_df, 
+    disabled=['자산/종목명', '현재 자산(원)'], # 이 두 칸은 수정 불가
+    use_container_width=True, hide_index=True
+)
+
+# 수정된 숫자를 바탕으로 복리 재계산
+total_future_value = 0
+result_data = []
+
+for idx, row in edited_df.iterrows():
+    asset = row['자산/종목명']
+    start_val = row['현재 자산(원)']
+    pmt = row['월 적립금(수정가능)']
+    annual_rate = row['연 수익률(%)(수정가능)'] / 100
+    monthly_rate = annual_rate / 12
+    
+    # 21개월 복리 계산
+    if monthly_rate > 0:
+        fv_start = start_val * ((1 + monthly_rate) ** 21)
+        fv_pmt = pmt * (((1 + monthly_rate) ** 21 - 1) / monthly_rate) * (1 + monthly_rate)
+        fv_total = fv_start + fv_pmt
+    else:
+        fv_total = start_val + (pmt * 21)
+        
+    total_future_value += fv_total
+    
+    if start_val > 0 or pmt > 0:
+        result_data.append({
+            '자산/종목명': asset,
+            '21개월간 투자할 총 원금': pmt * 21,
+            '2027년 최종 예상금액': fv_total
+        })
+
+# 시뮬레이션 결과 요약
+st.markdown("### 📊 시뮬레이션 결과")
+if total_future_value >= target_amount:
+    st.success(f"🎉 축하합니다! 이 계획대로라면 21개월 후 **총 {total_future_value:,.0f}원**으로, 6억 목표를 달성합니다!")
+else:
+    st.warning(f"⚠️ 이 계획대로라면 21개월 후 **총 {total_future_value:,.0f}원**으로, 목표까지 **{target_amount - total_future_value:,.0f}원**이 더 필요합니다.")
+
+# 시뮬레이션 상세 결과 표
+result_df = pd.DataFrame(result_data).sort_values(by='2027년 최종 예상금액', ascending=False)
+for col in ['21개월간 투자할 총 원금', '2027년 최종 예상금액']:
+    result_df[col] = result_df[col].map('{:,.0f}원'.format)
+st.dataframe(result_df, use_container_width=True, hide_index=True)
