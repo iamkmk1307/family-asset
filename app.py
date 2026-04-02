@@ -49,10 +49,19 @@ def load_data():
 
     df['현재가'] = df['티커(기호)'].apply(get_current_price)
 
+    # ⭐️ [업데이트] 금(GC=F) 1온스/달러 가격을 -> 1g/원화 가격으로 변환
+    def adjust_gold_price(row):
+        ticker = str(row['티커(기호)']).strip()
+        if ticker == 'GC=F':
+            return (row['현재가'] / 31.1034768) * usd_krw_rate
+        return row['현재가']
+        
+    df['현재가'] = df.apply(adjust_gold_price, axis=1)
+
     def calculate_current_value(row):
         ticker = str(row['티커(기호)']).strip()
         if row['대분류'] == '현금성' and ticker == 'USD': return row['보유수량'] * 1.0 * usd_krw_rate  
-        if ticker == 'GC=F': return row['보유수량'] * (row['현재가'] / 31.1034768) * usd_krw_rate
+        # 이제 금은 위에서 완벽한 원화 가격으로 바뀌었으므로 일반 자산과 똑같이 취급합니다.
         if pd.isna(row['티커(기호)']) or ticker == '' or ticker == '-': return row['투입원금(KRW)']
         if row['매수통화'] in ['USD', 'USDT']: return row['보유수량'] * row['현재가'] * usd_krw_rate
         else: return row['보유수량'] * row['현재가']
@@ -88,7 +97,7 @@ st.markdown("---")
 # ---------------------------------------------------------
 st.subheader("📋 종목별 상세 현황")
 
-display_df = df[['소유자', '자산/종목명', '투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']].copy()
+display_df = df[['소유자', '자산/종목명', '투입원금(KRW)', '현재가', '현재평가금액(KRW)', '수익금(KRW)']].copy()
 display_df['수익률(%)'] = np.where(display_df['투입원금(KRW)'] > 0, (display_df['수익금(KRW)'] / display_df['투입원금(KRW)']) * 100, 0)
 
 if total_current > 0:
@@ -97,13 +106,14 @@ else:
     display_df['자산비중(%)'] = 0.0
 
 total_row = pd.DataFrame({
-    '소유자': ['🔥총합🔥'], '자산/종목명': ['전체 자산'], '투입원금(KRW)': [total_principal], 
+    '소유자': ['🔥총합🔥'], '자산/종목명': ['전체 자산'], '투입원금(KRW)': [total_principal], '현재가': [0],
     '현재평가금액(KRW)': [total_current], '수익금(KRW)': [total_profit], '수익률(%)': [total_rate], '자산비중(%)': [100.0]
 })
 display_df = pd.concat([display_df, total_row], ignore_index=True)
 
 for col in ['투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']:
     display_df[col] = display_df[col].map('{:,.0f}'.format)
+display_df['현재가'] = display_df['현재가'].map('{:,.2f}'.format)
 display_df['수익률(%)'] = display_df['수익률(%)'].map('{:+.2f}%'.format)
 display_df['자산비중(%)'] = display_df['자산비중(%)'].map('{:.1f}%'.format)
 
@@ -111,14 +121,13 @@ st.dataframe(display_df, use_container_width=True, hide_index=True, key="detail_
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 5. ⭐️ [업데이트] 다중 통화 & 콤마 표시가 완벽 지원되는 시뮬레이터
+# 5. 목표가격 기반 시뮬레이터
 # ---------------------------------------------------------
 st.subheader("🔮 2027년 내 집 마련 시뮬레이터 (목표가격 기반)")
 st.write("💡 **'월 적립금'과 '목표가격' 칸을 더블클릭해서 수정해보세요!** 엑셀처럼 자동으로 콤마가 찍히며 실시간으로 계산됩니다.")
 
 current_assets = df.groupby('자산/종목명')['현재평가금액(KRW)'].sum()
 asset_prices = df.groupby('자산/종목명')['현재가'].first()
-# ⭐️ 구글 시트에서 '통화' 기준 가져오기
 asset_currencies = df.groupby('자산/종목명')['매수통화'].first() 
 
 default_pmt = {'ProShares QQQ 2X': 1000000, '비트코인': 600000, '이더리움': 400000, 'TIGER 미국배당다우존스': 1000000, '오클로': 180000, '프리포트 맥모란': 300000, 'Uranium ETF': 250000, '금': 450000}
@@ -134,7 +143,7 @@ for asset, val in current_assets.items():
     
     sim_data.append({
         '자산/종목명': asset,
-        '통화': currency,  # 👈 통화 표시 추가!
+        '통화': currency, 
         '현재 자산(원)': val,
         '월 적립금(수정가능)': default_pmt.get(asset, 0),
         '현재가격': curr_price,
@@ -143,7 +152,6 @@ for asset, val in current_assets.items():
 
 sim_input_df = pd.DataFrame(sim_data)
 
-# ⭐️ 스트림릿의 column_config를 이용해 콤마(,) 시각적 디자인 입히기
 edited_df = st.data_editor(
     sim_input_df, 
     disabled=['자산/종목명', '통화', '현재 자산(원)', '현재가격'],
@@ -157,7 +165,6 @@ edited_df = st.data_editor(
     key="simulator_table_key" 
 )
 
-# 복리 재계산 로직
 total_future_value = 0
 result_data = []
 
@@ -169,7 +176,6 @@ for idx, row in edited_df.iterrows():
     target_p = row['목표가격(수정가능)']
     currency = row['통화']
     
-    # 목표가격을 통한 연수익률 역산 (약 21개월 = 1.75년)
     years_left = 1.75
     if curr_p > 0 and target_p > curr_p:
         annual_rate = (((target_p / curr_p) ** (1 / years_left)) - 1)
@@ -196,14 +202,12 @@ for idx, row in edited_df.iterrows():
             '2027년 최종 예상금액': fv_total
         })
 
-# 시뮬레이션 결과 요약
 st.markdown("### 📊 시뮬레이션 결과")
 if total_future_value >= target_amount:
     st.success(f"🎉 축하합니다! 이 목표가대로라면 21개월 후 **총 {total_future_value:,.0f}원**으로, 6억 목표를 달성합니다!")
 else:
     st.warning(f"⚠️ 이 목표가대로라면 21개월 후 **총 {total_future_value:,.0f}원**으로, 목표까지 **{target_amount - total_future_value:,.0f}원**이 더 필요합니다.")
 
-# 시뮬레이션 상세 결과 표
 result_df = pd.DataFrame(result_data).sort_values(by='2027년 최종 예상금액', ascending=False)
 for col in ['21개월간 투자할 총 원금', '2027년 최종 예상금액']:
     result_df[col] = result_df[col].map('{:,.0f}원'.format)
