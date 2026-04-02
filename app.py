@@ -14,10 +14,17 @@ st.set_page_config(page_title="우리가족 자산 대시보드", layout="wide")
 st.title("👨‍👩‍👧 우리 가족 통합 자산 대시보드")
 st.markdown("---")
 
+# ⭐️ [추가할 코드] 수동 새로고침 버튼 
+if st.button("🔄 최신 데이터 불러오기 (구글시트 반영)"):
+    st.cache_data.clear() # 파이썬이 기억하던 옛날 데이터를 지웁니다.
+    st.rerun() # 화면을 즉시 새로고침합니다.
+
+st.markdown("---")
+
 # ---------------------------------------------------------
-# 2. 구글 API 연결 및 데이터 수집 (1분마다 자동 새로고침!)
+# 2. 구글 API 연결 및 데이터 수집 ((수동)새로고침 누를때)
 # ---------------------------------------------------------
-@st.cache_data(ttl=60) # 💡 핵심: 60초마다 구글 시트의 새로운 데이터를 가져옵니다.
+@st.cache_data # 
 def load_data():
     scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     secret_dict = json.loads(st.secrets["GCP_JSON"]) 
@@ -133,7 +140,8 @@ sim_input_df = pd.DataFrame(sim_data)
 edited_df = st.data_editor(
     sim_input_df, 
     disabled=['자산/종목명', '현재 자산(원)'], # 이 두 칸은 수정 불가
-    use_container_width=True, hide_index=True
+    use_container_width=True, hide_index=True,
+    key="simulator_table_key"
 )
 
 # 수정된 숫자를 바탕으로 복리 재계산
