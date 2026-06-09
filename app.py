@@ -13,14 +13,14 @@ from datetime import datetime
 st.set_page_config(page_title="우리가족 자산 대시보드", layout="wide")
 st.title("👨‍👩‍👧 우리 가족 통합 자산 대시보드")
 
-if st.button("🔄 최신 데이터 불러오기 (구글시트/실시간시세 반영)"):
+if st.button("🔄 최신 데이터 불러오기"):
     st.cache_data.clear()
     st.rerun()
 
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 2. 구글 API 연결 및 데이터 수집 (History 연동 포함)
+# 2. 구글 API 연결 및 데이터 수집
 # ---------------------------------------------------------
 @st.cache_data
 def load_data():
@@ -44,7 +44,7 @@ def load_data():
             errors='coerce'
         ).fillna(0)
 
-    # 시세 및 환율
+    # 시세 및 환율 수집
     usd_krw_rate = yf.Ticker("KRW=X").history(period="1d")["Close"].iloc[-1]
     
     def get_current_price(ticker):
@@ -90,31 +90,48 @@ def load_data():
     if now.day == 1:
         if h_df.empty or today_str not in h_df['날짜'].astype(str).values:
             h_worksheet.append_row([today_str, int(total_p), int(total_c)])
-            h_df = pd.DataFrame(h_worksheet.get_all_records()) # 갱신
+            h_df = pd.DataFrame(h_worksheet.get_all_records())
     
     return df, usd_krw_rate, h_df
 
-with st.spinner("🔄 데이터를 불러오고 히스토리를 체크하는 중..."):
+with st.spinner("🔄 데이터를 불러오는 중입니다..."):
     df, usd_krw_rate, history_df = load_data()
 
 # ---------------------------------------------------------
-# 3. 화면 상단 요약 지표
+# 3. ⭐️ [변경점 2] 화면 상단 요약 지표 및 히스토리 우측 배치
 # ---------------------------------------------------------
 total_principal = df['투입원금(KRW)'].sum()
 total_current = df['현재평가금액(KRW)'].sum()
 total_profit = df['수익금(KRW)'].sum()
 total_rate = (total_profit / total_principal) * 100 if total_principal > 0 else 0
 
-col1, col2 = st.columns(2)
+# 상단 공간을 3개 컬럼 레이아웃으로 분할
+col1, col2, col3 = st.columns([1, 1, 1.8])
+
+# 왼쪽과 중앙에 지표 배치
 col1.metric(label="💰 총 투입 원금", value=f"{total_principal:,.0f}원")
 col2.metric(label="📈 현재 총 자산", value=f"{total_current:,.0f}원", delta=f"{total_profit:+,.0f}원 ({total_rate:+.2f}%)")
+
+# 오른쪽 남는 공간(col3)에 접이식 히스토리 배치
+with col3:
+    if not history_df.empty:
+        latest_date = history_df['날짜'].iloc[-1]
+        with st.expander(f"📜 월별 자산 성장 기록 (최근: {latest_date})", expanded=False):
+            h_display = history_df.copy().sort_values(by='날짜', ascending=False)
+            for col in ['총 투입 원금', '현재 총 자산']:
+                h_display[col] = h_display[col].map('{:,.0f}원'.format)
+            st.dataframe(h_display, use_container_width=True, hide_index=True, height=160)
+    else:
+        st.info("아직 기록된 히스토리가 없습니다.")
+
 st.markdown(f"*🔎 적용 환율: 1달러 = {usd_krw_rate:,.2f}원*")
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. 종목별 상세 현황
+# 4. 종목별 상세 현황 (스크롤 없이 확장 완료)
 # ---------------------------------------------------------
 st.subheader("📋 종목별 상세 현황")
+
 display_df = df[['소유자', '자산/종목명', '투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']].copy()
 display_df['수익률(%)'] = np.where(display_df['투입원금(KRW)'] > 0, (display_df['수익금(KRW)'] / display_df['투입원금(KRW)']) * 100, 0)
 display_df['자산비중(%)'] = (display_df['현재평가금액(KRW)'] / total_current) * 100 if total_current > 0 else 0
@@ -127,37 +144,38 @@ for col in ['투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']:
 formatted_df['수익률(%)'] = formatted_df['수익률(%)'].map('{:+.2f}%'.format)
 formatted_df['자산비중(%)'] = formatted_df['자산비중(%)'].map('{:.1f}%'.format)
 
-st.dataframe(formatted_df, use_container_width=True, hide_index=True, height=(len(display_df)*36)+40)
+# 맨 아래 총합 행 추가
+total_row = pd.DataFrame({
+    '소유자': ['-'], '자산/종목명': ['🔥총합🔥'], '투입원금(KRW)': [f"{total_principal:,.0f}"], 
+    '현재평가금액(KRW)': [f"{total_current:,.0f}"], '수익금(KRW)': [f"{total_profit:+,.0f}"], 
+    '수익률(%)': [f"{total_rate:+.2f}%"], '자산비중(%)': ['100.0%']
+})
+formatted_df = pd.concat([formatted_df, total_row], ignore_index=True)
+
+st.dataframe(formatted_df, use_container_width=True, hide_index=True, height=(len(display_df)*36)+80)
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 5. ⭐️ [새 기능] 대분류별 요약 표
+# 5. ⭐️ [변경점 1] 대분류별 요약 표 (대분류 전면 배치, 소분류 종류 매핑)
 # ---------------------------------------------------------
 st.subheader("📁 대분류별 자산 비중")
-cat_df = df.groupby('대분류').agg({'현재평가금액(KRW)': 'sum'}).reset_index()
+
+# 대분류 기준으로 묶되, 속한 종목명들을 중복 없이 결합하여 소분류 칸 생성
+cat_df = df.groupby('대분류').agg({
+    '현재평가금액(KRW)': 'sum',
+    '자산/종목명': lambda x: ", ".join(dict.fromkeys(x.astype(str).str.strip()))
+}).reset_index()
+
 cat_df['비중(%)'] = (cat_df['현재평가금액(KRW)'] / total_current) * 100 if total_current > 0 else 0
 cat_df = cat_df.sort_values(by='현재평가금액(KRW)', ascending=False)
 
-# 포맷팅
-cat_df['현재평가금액(KRW)'] = cat_df['현재평가금액(KRW)'].map('{:,.0f}원'.format)
+# 컬럼 순서 재배치 (대분류 맨 앞으로) 및 이름 매핑
+cat_df = cat_df[['대분류', '자산/종목명', '현재평가금액(KRW)', '비중(%)']]
+cat_df.columns = ['대분류', '소분류 종류', '현재평가금액', '비중(%)']
+
+# 출력용 포맷팅
+cat_df['현재평가금액'] = cat_df['현재평가금액'].map('{:,.0f}원'.format)
 cat_df['비중(%)'] = cat_df['비중(%)'].map('{:.1f}%'.format)
 
-st.table(cat_df) # 요약표는 깔끔하게 static table로 표시
-st.markdown("---")
-
-# ---------------------------------------------------------
-# 6. ⭐️ [새 기능] 월별 히스토리 기록 (Expander)
-# ---------------------------------------------------------
-if not history_df.empty:
-    latest_date = history_df['날짜'].iloc[-1]
-    with st.expander(f"📜 월별 자산 성장 기록 (최근 기록: {latest_date})"):
-        st.write("매월 1일의 총 자산 상태가 자동으로 기록됩니다.")
-        
-        # 히스토리용 포맷팅
-        h_display = history_df.copy().sort_values(by='날짜', ascending=False)
-        for col in ['총 투입 원금', '현재 총 자산']:
-            h_display[col] = h_display[col].map('{:,.0f}원'.format)
-        
-        st.dataframe(h_display, use_container_width=True, hide_index=True)
-else:
-    st.info("아직 기록된 히스토리가 없습니다. 매월 1일에 첫 기록이 시작됩니다.")
+# hide_index=True 옵션으로 앞쪽 정렬용 인덱스 숫자 완벽 제거
+st.dataframe(cat_df, use_container_width=True, hide_index=True)
