@@ -33,7 +33,7 @@ def load_data():
     rows = worksheet.get_all_values()
     df = pd.DataFrame(rows[1:], columns=rows[0])
 
-    # ✨ [핵심 수정 1] 구글 시트의 유령 빈칸 완벽 제거
+    # 구글 시트의 유령 빈칸 완벽 제거
     df = df[df['자산/종목명'].astype(str).str.strip() != '']
 
     cols_to_fix = ['보유수량', '매수단가', '투입원금(KRW)']
@@ -76,7 +76,7 @@ with st.spinner("🔄 데이터를 불러오는 중입니다..."):
     df, usd_krw_rate = load_data()
 
 # ---------------------------------------------------------
-# 3. 화면 상단 요약 지표 (불필요한 목표 달성률 삭제)
+# 3. 화면 상단 요약 지표
 # ---------------------------------------------------------
 total_principal = df['투입원금(KRW)'].sum()
 total_current = df['현재평가금액(KRW)'].sum()
@@ -90,34 +90,28 @@ st.markdown(f"*🔎 적용 환율: 1달러 = {usd_krw_rate:,.2f}원*")
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. ⭐️ 종목별 상세 현황 (압축 및 자동 정렬)
+# 4. ⭐️ 종목별 상세 현황 (소유자 분리 & 스크롤 제거)
 # ---------------------------------------------------------
 st.subheader("📋 종목별 상세 현황")
 
-# ✨ [핵심 수정 2] 자산/종목명 단위로 완전히 묶어서 합산
-grouped_df = df.groupby(['대분류', '자산/종목명']).agg({
-    '투입원금(KRW)': 'sum',
-    '현재평가금액(KRW)': 'sum',
-    '수익금(KRW)': 'sum'
-}).reset_index()
-
-# 묶인 덩어리를 기준으로 수익률 재계산
-grouped_df['수익률(%)'] = np.where(grouped_df['투입원금(KRW)'] > 0, (grouped_df['수익금(KRW)'] / grouped_df['투입원금(KRW)']) * 100, 0)
+# 압축 해제: 원본 데이터를 그대로 띄웁니다 (소유자 유지)
+display_df = df[['소유자', '자산/종목명', '투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']].copy()
+display_df['수익률(%)'] = np.where(display_df['투입원금(KRW)'] > 0, (display_df['수익금(KRW)'] / display_df['투입원금(KRW)']) * 100, 0)
 
 if total_current > 0:
-    grouped_df['자산비중(%)'] = (grouped_df['현재평가금액(KRW)'] / total_current) * 100
+    display_df['자산비중(%)'] = (display_df['현재평가금액(KRW)'] / total_current) * 100
 else:
-    grouped_df['자산비중(%)'] = 0.0
+    display_df['자산비중(%)'] = 0.0
 
-# 평가금액이 큰 순서대로 내림차순 정렬 (한눈에 자산 규모 파악)
-grouped_df = grouped_df.sort_values(by='현재평가금액(KRW)', ascending=False)
+# 덩어리(평가금액)가 큰 순서대로 내림차순 정렬
+display_df = display_df.sort_values(by='현재평가금액(KRW)', ascending=False)
 
 # 맨 아래 총합 행 추가
 total_row = pd.DataFrame({
-    '대분류': ['-'], '자산/종목명': ['🔥총합🔥'], '투입원금(KRW)': [total_principal], 
+    '소유자': ['-'], '자산/종목명': ['🔥총합🔥'], '투입원금(KRW)': [total_principal], 
     '현재평가금액(KRW)': [total_current], '수익금(KRW)': [total_profit], '수익률(%)': [total_rate], '자산비중(%)': [100.0]
 })
-display_df = pd.concat([grouped_df, total_row], ignore_index=True)
+display_df = pd.concat([display_df, total_row], ignore_index=True)
 
 # 화면에 예쁘게 출력하기 위한 포맷팅
 for col in ['투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']:
@@ -125,5 +119,8 @@ for col in ['투입원금(KRW)', '현재평가금액(KRW)', '수익금(KRW)']:
 display_df['수익률(%)'] = display_df['수익률(%)'].map('{:+.2f}%'.format)
 display_df['자산비중(%)'] = display_df['자산비중(%)'].map('{:.1f}%'.format)
 
-# 웹에 표 출력
-st.dataframe(display_df, use_container_width=True, hide_index=True)
+# ⭐️ [핵심] 표 세로 길이 동적 계산 (데이터 행 개수 * 줄 높이 36픽셀 + 여백 40픽셀)
+dynamic_height = (len(display_df) * 36) + 40
+
+# 웹에 표 출력 (height 옵션을 주어 스크롤바 삭제)
+st.dataframe(display_df, use_container_width=True, hide_index=True, height=dynamic_height)
