@@ -8,541 +8,1003 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# ---------------------------------------------------------
-# 0. 상수
-# ---------------------------------------------------------
+# =========================================================
+# 0. 기본 설정
+# =========================================================
 SHEET_KEY = "12hQFqNwUUqPr1Fhlqp5hT0nwhGKLI3mfGM0qBr0NM_w"
+ASSET_SHEET_NAME = "자산관리(코딩용)"
+HISTORY_SHEET_NAME = "History"
+
 KST = ZoneInfo("Asia/Seoul")
 TROY_OUNCE_TO_GRAM = 31.1034768
 
-# ---------------------------------------------------------
-# 1. 웹 앱 기본 설정 및 새로고침 버튼
-# ---------------------------------------------------------
-st.set_page_config(page_title="우리가족 자산 대시보드", layout="wide")
+SUPPORTED_CASH_CURRENCIES = {
+    "KRW", "USD", "USDT", "JPY", "EUR", "CNY", "HKD",
+    "GBP", "CAD", "AUD", "SGD", "CHF"
+}
+
+st.set_page_config(
+    page_title="우리가족 자산 대시보드",
+    page_icon="👨‍👩‍👧",
+    layout="wide",
+)
+
 st.title("👨‍👩‍👧 우리 가족 통합 자산 대시보드")
 
-if st.button("🔄 최신 데이터 불러오기"):
-    st.cache_data.clear()
-    st.rerun()
+top_left, top_right = st.columns([1, 5])
+with top_left:
+    if st.button("🔄 최신 데이터"):
+        st.cache_data.clear()
+        st.rerun()
 
-st.markdown("---")
+st.caption(
+    "외화자산은 원통화 기준 원가를 보존하고, 현재 평가액만 최신 환율로 KRW 환산합니다. "
+    "`실제투입원금(KRW)`은 환율이 바뀌어도 변하지 않는 고정 원금으로 사용합니다."
+)
+st.divider()
 
-# ---------------------------------------------------------
-# 2. 공통 함수: 숫자 정리 / Yahoo 시세 / 환율
-# ---------------------------------------------------------
-def to_number(value):
+
+# =========================================================
+# 1. 공통 유틸
+# =========================================================
+def to_number(value, default=0.0):
     if value is None:
-        return 0.0
+        return default
+
     s = str(value).strip()
     if s == "":
-        return 0.0
+        return default
+
     for ch in [",", "₩", "$", "¥", "€", "%"]:
         s = s.replace(ch, "")
+
     try:
         return float(s)
     except Exception:
-        return 0.0
+        return default
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def get_market_data(ticker: str):
+def clean_text(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def is_valid_number(value):
+    try:
+        return np.isfinite(float(value))
+    except Exception:
+        return False
+
+
+def format_won(value):
+    if not is_valid_number(value):
+        return "-"
+    return f"{float(value):,.0f}원"
+
+
+def format_money(value, currency):
+    if not is_valid_number(value):
+        return "-"
+
+    currency = clean_text(currency).upper()
+    value = float(value)
+
+    if currency == "KRW":
+        return f"{value:,.0f}원"
+    if currency in {"USD", "USDT"}:
+        return f"${value:,.2f}"
+    return f"{value:,.2f} {currency}"
+
+
+# =========================================================
+# 2. Yahoo Finance 시세 / 환율
+# =========================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def get_market_data(ticker):
     """
-    반환값: (현재가, 시세통화, 상태)
-    현재가는 Yahoo Finance가 제공하는 해당 종목의 '시세통화' 기준 가격.
+    반환:
+        price: Yahoo 시세통화 기준 현재가(최근가)
+        currency: Yahoo가 보고한 시세통화
+        status: 조회 상태
     """
-    ticker = str(ticker).strip()
-    if ticker in ["", "-"]:
+    ticker = clean_text(ticker)
+
+    if ticker in {"", "-"}:
         return np.nan, "", "NO_TICKER"
 
     try:
-        t = yf.Ticker(ticker)
+        obj = yf.Ticker(ticker)
 
-        # 1차: fast_info의 최근 가격
         price = np.nan
+
+        # 1차: 가장 최근 가격
         try:
-            price = float(t.fast_info["last_price"])
+            fast = obj.fast_info
+            p = fast.get("last_price")
+            if p is not None and is_valid_number(p) and float(p) > 0:
+                price = float(p)
         except Exception:
             pass
 
-        # 2차 fallback: 최근 5거래일 종가
-        if not np.isfinite(price) or price <= 0:
-            hist = t.history(
+        # 2차: 최근 거래일 종가
+        if not is_valid_number(price) or price <= 0:
+            hist = obj.history(
                 period="5d",
                 interval="1d",
                 auto_adjust=False,
                 repair=True,
             )
-            closes = hist["Close"].dropna() if "Close" in hist.columns else pd.Series(dtype=float)
-            if not closes.empty:
-                price = float(closes.iloc[-1])
+            if not hist.empty and "Close" in hist.columns:
+                closes = hist["Close"].dropna()
+                if not closes.empty:
+                    price = float(closes.iloc[-1])
 
-        # 시세통화는 metadata에서 읽음
+        # history(repair=True) 뒤 metadata의 currency 사용
         currency = ""
         try:
-            md = t.get_history_metadata()
-            currency = str(md.get("currency", "")).upper().strip()
+            metadata = obj.get_history_metadata()
+            currency = clean_text(metadata.get("currency", "")).upper()
         except Exception:
-            try:
-                currency = str(t.fast_info["currency"]).upper().strip()
-            except Exception:
-                currency = ""
+            pass
 
-        if not np.isfinite(price) or price <= 0:
+        # fast_info의 currency fallback
+        if not currency:
+            try:
+                currency = clean_text(obj.fast_info.get("currency", "")).upper()
+            except Exception:
+                pass
+
+        if not is_valid_number(price) or price <= 0:
             return np.nan, currency, "PRICE_ERROR"
 
-        # 금 선물 GC=F는 USD / troy ounce -> USD / gram으로 단위 변환
-        if ticker == "GC=F":
-            price = price / TROY_OUNCE_TO_GRAM
-            return price, currency or "USD", "OK_GOLD_USD_PER_GRAM"
-
-        return price, currency, "OK"
+        return float(price), currency, "OK"
 
     except Exception as e:
         return np.nan, "", f"ERROR:{type(e).__name__}"
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def get_fx_to_krw(currency: str):
+@st.cache_data(ttl=600, show_spinner=False)
+def get_fx_to_krw(currency):
     """
-    1 단위 외화가 몇 KRW인지 반환.
-    KRW=1, USD는 Yahoo의 KRW=X(USD/KRW),
-    기타 통화는 XXXKRW=X 직접환율 우선, 실패 시 USD 교차환율 사용.
+    1 단위 외화가 몇 KRW인지 반환합니다.
+    예:
+      USD -> 약 1,4xx KRW
+      JPY -> 약 9~10 KRW
     """
-    ccy = str(currency).upper().strip()
+    ccy = clean_text(currency).upper()
 
-    if ccy in ["", "KRW"]:
+    if ccy in {"", "KRW"}:
         return 1.0
 
-    # USDT는 자산관리 목적상 USD와 동일 취급.
-    # 거래소별 김치프리미엄/디페깅까지 반영하려면 별도 시세원을 붙이는 것이 좋음.
     if ccy == "USDT":
         ccy = "USD"
 
+    # USD/KRW
     if ccy == "USD":
         px, _, status = get_market_data("KRW=X")
-        if status.startswith("OK") and np.isfinite(px):
+        if status == "OK" and is_valid_number(px):
             return float(px)
         return np.nan
 
-    # 1차: 직접 환율 (예: JPYKRW=X, EURKRW=X)
-    direct_ticker = f"{ccy}KRW=X"
-    px, _, status = get_market_data(direct_ticker)
-    if status.startswith("OK") and np.isfinite(px):
-        return float(px)
+    # 직접 환율: JPYKRW=X, EURKRW=X 등
+    direct_px, _, direct_status = get_market_data(f"{ccy}KRW=X")
+    if direct_status == "OK" and is_valid_number(direct_px) and direct_px > 0:
+        return float(direct_px)
 
-    # 2차: USD 교차환율
-    # Yahoo의 다수 통화는 XXX=X가 USD/XXX 형태 (예: JPY=X = USD/JPY)
     usd_krw = get_fx_to_krw("USD")
-    usd_to_ccy_ticker = f"{ccy}=X"
-    usd_to_ccy, _, status2 = get_market_data(usd_to_ccy_ticker)
-    if (
-        np.isfinite(usd_krw)
-        and status2.startswith("OK")
-        and np.isfinite(usd_to_ccy)
-        and usd_to_ccy > 0
-    ):
-        return float(usd_krw / usd_to_ccy)
+    if not is_valid_number(usd_krw):
+        return np.nan
 
-    # 3차: 일부 통화는 XXXUSD=X 형태 (예: GBPUSD=X)
-    ccy_to_usd_ticker = f"{ccy}USD=X"
-    ccy_to_usd, _, status3 = get_market_data(ccy_to_usd_ticker)
-    if (
-        np.isfinite(usd_krw)
-        and status3.startswith("OK")
-        and np.isfinite(ccy_to_usd)
-        and ccy_to_usd > 0
-    ):
-        return float(ccy_to_usd * usd_krw)
+    # USD/통화 형태: JPY=X, CNY=X 등
+    cross_px, _, cross_status = get_market_data(f"{ccy}=X")
+    if cross_status == "OK" and is_valid_number(cross_px) and cross_px > 0:
+        return float(usd_krw / cross_px)
+
+    # 통화/USD 형태: EURUSD=X, GBPUSD=X 등
+    cross_px2, _, cross_status2 = get_market_data(f"{ccy}USD=X")
+    if cross_status2 == "OK" and is_valid_number(cross_px2) and cross_px2 > 0:
+        return float(cross_px2 * usd_krw)
 
     return np.nan
 
 
-# ---------------------------------------------------------
-# 3. 구글 API 연결 및 데이터 수집
-# ---------------------------------------------------------
-@st.cache_data(ttl=900)
-def load_data():
+# =========================================================
+# 3. Google Sheets 연결
+# =========================================================
+def get_spreadsheet():
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    secret_dict = json.loads(st.secrets["GCP_JSON"])
-    credentials = Credentials.from_service_account_info(secret_dict, scopes=scope)
-    gc = gspread.authorize(credentials)
 
-    spreadsheet = gc.open_by_key(SHEET_KEY)
-    worksheet = spreadsheet.sheet1
+    secret_dict = json.loads(st.secrets["GCP_JSON"])
+    credentials = Credentials.from_service_account_info(
+        secret_dict,
+        scopes=scope,
+    )
+
+    gc = gspread.authorize(credentials)
+    return gc.open_by_key(SHEET_KEY)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_asset_sheet():
+    spreadsheet = get_spreadsheet()
+    worksheet = spreadsheet.worksheet(ASSET_SHEET_NAME)
+
     rows = worksheet.get_all_values()
 
     if not rows:
-        raise ValueError("메인 시트에 데이터가 없습니다.")
+        raise ValueError(f"`{ASSET_SHEET_NAME}` 시트에 데이터가 없습니다.")
 
     df = pd.DataFrame(rows[1:], columns=rows[0])
 
-    required_cols = [
+    # 과거 컬럼명도 호환
+    if "실제투입원금(KRW)" not in df.columns and "투입원금(KRW)" in df.columns:
+        df["실제투입원금(KRW)"] = df["투입원금(KRW)"]
+
+    required = [
         "소유자",
         "대분류",
+        "소분류",
         "자산/종목명",
+        "금융사/거래소",
         "티커(기호)",
+        "매수통화",
         "보유수량",
         "매수단가",
-        "매수통화",
-        "투입원금(KRW)",
+        "실제투입원금(KRW)",
     ]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"시트에 필요한 컬럼이 없습니다: {', '.join(missing)}")
 
-    # 선택 컬럼: 있으면 수동 보정에 사용, 없어도 앱은 정상 작동
-    if "시세통화" not in df.columns:
-        df["시세통화"] = ""
-    if "수동현재가" not in df.columns:
-        df["수동현재가"] = ""
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            "시트에 필요한 컬럼이 없습니다: " + ", ".join(missing)
+        )
+
+    if "취득원가" not in df.columns:
+        df["취득원가"] = ""
+
+    # 선택 컬럼: J열을 나중에 평균취득환율로 바꿔도 호환
+    if "평균취득환율" not in df.columns:
+        if "평균취득환율(KRW/통화)" in df.columns:
+            df["평균취득환율"] = df["평균취득환율(KRW/통화)"]
+        else:
+            df["평균취득환율"] = ""
 
     # 빈 행 제거
-    df = df[df["자산/종목명"].astype(str).str.strip() != ""].copy()
-
-    # 숫자 정리
-    for col in ["보유수량", "매수단가", "투입원금(KRW)", "수동현재가"]:
-        df[col] = df[col].apply(to_number)
+    df = df[
+        df["자산/종목명"].astype(str).str.strip() != ""
+    ].copy()
 
     # 문자열 정리
-    for col in ["소유자", "대분류", "자산/종목명", "티커(기호)", "매수통화", "시세통화"]:
-        df[col] = df[col].astype(str).str.strip()
+    text_cols = [
+        "소유자", "대분류", "소분류", "자산/종목명",
+        "금융사/거래소", "티커(기호)", "매수통화"
+    ]
+    for col in text_cols:
+        df[col] = df[col].map(clean_text)
 
-    # 티커는 중복 호출하지 않고 1회씩만 조회
+    # 숫자 정리
+    numeric_cols = [
+        "보유수량", "매수단가", "취득원가",
+        "평균취득환율", "실제투입원금(KRW)"
+    ]
+    for col in numeric_cols:
+        df[col] = df[col].map(to_number)
+
+    return df
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_history():
+    spreadsheet = get_spreadsheet()
+
+    try:
+        worksheet = spreadsheet.worksheet(HISTORY_SHEET_NAME)
+    except Exception:
+        return pd.DataFrame(
+            columns=["날짜", "총 투입 원금", "현재 총 자산"]
+        )
+
+    rows = worksheet.get_all_values()
+    if not rows:
+        return pd.DataFrame(
+            columns=["날짜", "총 투입 원금", "현재 총 자산"]
+        )
+
+    return pd.DataFrame(rows[1:], columns=rows[0])
+
+
+def save_monthly_history(total_principal, total_current):
+    """
+    해당 월의 기록이 없을 때만 1회 저장.
+    날짜는 월 구분을 위해 YYYY-MM-01 형태로 저장합니다.
+    """
+    try:
+        spreadsheet = get_spreadsheet()
+
+        try:
+            worksheet = spreadsheet.worksheet(HISTORY_SHEET_NAME)
+        except Exception:
+            worksheet = spreadsheet.add_worksheet(
+                title=HISTORY_SHEET_NAME,
+                rows=200,
+                cols=5,
+            )
+            worksheet.append_row(
+                ["날짜", "총 투입 원금", "현재 총 자산"]
+            )
+
+        rows = worksheet.get_all_values()
+
+        now = datetime.now(KST)
+        month_key = now.strftime("%Y-%m")
+        month_label = now.strftime("%Y-%m-01")
+
+        existing_dates = []
+        if len(rows) >= 2:
+            existing_dates = [
+                clean_text(r[0])
+                for r in rows[1:]
+                if len(r) > 0
+            ]
+
+        already_exists = any(
+            d.startswith(month_key)
+            for d in existing_dates
+        )
+
+        if not already_exists:
+            worksheet.append_row([
+                month_label,
+                int(round(total_principal)),
+                int(round(total_current)),
+            ])
+
+        return True
+
+    except Exception:
+        # History 저장 실패가 대시보드 전체를 막지 않도록 함
+        return False
+
+
+# =========================================================
+# 4. 자산 평가 엔진
+# =========================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def evaluate_assets(raw_df):
+    df = raw_df.copy()
+
     unique_tickers = sorted({
-        t for t in df["티커(기호)"].astype(str).str.strip().tolist()
-        if t not in ["", "-"] and t.upper() not in [
-            "KRW", "USD", "USDT", "JPY", "EUR", "CNY", "HKD", "GBP", "CAD", "AUD", "SGD", "CHF"
-        ]
+        clean_text(t)
+        for t in df["티커(기호)"].tolist()
+        if clean_text(t) not in {"", "-"}
     })
-    market_map = {ticker: get_market_data(ticker) for ticker in unique_tickers}
 
-    prices = []
-    quote_ccys = []
-    fx_rates = []
-    statuses = []
-    current_values = []
-    implied_buy_fx = []
-    price_effects = []
-    fx_effects = []
-
-    cash_currency_codes = {
-        "KRW", "USD", "USDT", "JPY", "EUR", "CNY", "HKD", "GBP", "CAD", "AUD", "SGD", "CHF"
+    market_map = {
+        ticker: get_market_data(ticker)
+        for ticker in unique_tickers
     }
 
+    evaluated_rows = []
+
     for _, row in df.iterrows():
-        ticker = str(row["티커(기호)"]).strip()
-        manual_price = float(row["수동현재가"] or 0)
-        manual_ccy = str(row["시세통화"]).upper().strip()
-        buy_ccy = str(row["매수통화"]).upper().strip()
-        qty = float(row["보유수량"] or 0)
-        buy_price = float(row["매수단가"] or 0)
-        principal = float(row["투입원금(KRW)"] or 0)
-        category = str(row["대분류"]).strip()
+        owner = clean_text(row["소유자"])
+        major = clean_text(row["대분류"])
+        minor = clean_text(row["소분류"])
+        name = clean_text(row["자산/종목명"])
+        institution = clean_text(row["금융사/거래소"])
+        ticker = clean_text(row["티커(기호)"])
+        buy_ccy = clean_text(row["매수통화"]).upper()
 
-        # 1) 현금성 자산: 티커에 통화코드를 직접 넣는 방식 지원
-        if category == "현금성" and ticker.upper() in cash_currency_codes:
-            quote_ccy = ticker.upper()
-            if quote_ccy == "USDT":
-                quote_ccy = "USDT"
-            fx = get_fx_to_krw(quote_ccy)
-            price = 1.0
-            value = qty * fx if np.isfinite(fx) else np.nan
-            status = "OK_CASH" if np.isfinite(value) else "FX_ERROR"
+        qty = to_number(row["보유수량"])
+        avg_buy_price = to_number(row["매수단가"])
+        fixed_principal = to_number(row["실제투입원금(KRW)"])
+        stored_buy_fx = to_number(row.get("평균취득환율", 0))
 
-        # 2) 티커가 없는 자산: 투입원금을 현재가치로 유지
-        elif ticker in ["", "-"]:
-            price = np.nan
-            quote_ccy = "KRW"
-            fx = 1.0
-            value = principal
-            status = "NO_TICKER_USE_PRINCIPAL"
+        current_price = np.nan
+        quote_ccy = buy_ccy
+        fx_rate = 1.0
+        current_native_value = np.nan
+        current_krw_value = np.nan
+        status = "OK"
+        valuation_type = ""
 
-        # 3) 일반 종목/ETF/코인/금
-        else:
-            auto_price, auto_ccy, market_status = market_map.get(ticker, get_market_data(ticker))
+        # -------------------------------------------------
+        # A. 티커가 있는 시장성 자산
+        # -------------------------------------------------
+        if ticker not in {"", "-"}:
+            market_price, market_ccy, market_status = market_map.get(
+                ticker,
+                (np.nan, "", "PRICE_ERROR"),
+            )
 
-            # 수동현재가가 있으면 가격만 수동값 우선
-            if manual_price > 0:
-                price = manual_price
-                status = "OK_MANUAL_PRICE"
-            else:
-                price = auto_price
+            if market_status != "OK":
                 status = market_status
-
-            # 시세통화 수동지정 > Yahoo 자동감지 > 매수통화 fallback
-            quote_ccy = manual_ccy or str(auto_ccy).upper().strip() or buy_ccy or "KRW"
-            fx = get_fx_to_krw(quote_ccy)
-
-            if np.isfinite(price) and price > 0 and np.isfinite(fx) and fx > 0:
-                value = qty * price * fx
             else:
-                value = np.nan
-                if not np.isfinite(price) or price <= 0:
-                    status = "PRICE_ERROR"
-                elif not np.isfinite(fx) or fx <= 0:
+                current_price = market_price
+                quote_ccy = market_ccy or buy_ccy
+
+                # 금 선물은 USD/troy oz -> USD/gram
+                if ticker == "GC=F":
+                    current_price = current_price / TROY_OUNCE_TO_GRAM
+                    quote_ccy = "USD"
+                    valuation_type = "GOLD_GRAM"
+                else:
+                    valuation_type = "MARKET"
+
+                fx_rate = get_fx_to_krw(quote_ccy)
+
+                if not is_valid_number(fx_rate):
                     status = "FX_ERROR"
+                else:
+                    current_native_value = qty * current_price
+                    current_krw_value = current_native_value * fx_rate
 
-        prices.append(price)
-        quote_ccys.append(quote_ccy)
-        fx_rates.append(fx)
-        statuses.append(status)
-        current_values.append(value)
+        # -------------------------------------------------
+        # B. 티커 없는 외화 현금 / RP
+        #     보유수량을 외화 잔액으로 해석
+        # -------------------------------------------------
+        elif buy_ccy in SUPPORTED_CASH_CURRENCIES and buy_ccy != "KRW":
+            valuation_type = "FOREIGN_CASH"
+            quote_ccy = buy_ccy
+            current_price = 1.0
+            fx_rate = get_fx_to_krw(quote_ccy)
 
-        # 매수 당시의 암묵적 환율 추정:
-        # 투입원금(KRW) / (보유수량 x 매수단가)
-        # 수수료/부분매도/추가매수가 복잡하면 '참고값'으로 보는 것이 맞음.
-        if qty > 0 and buy_price > 0 and principal > 0:
-            buy_fx = principal / (qty * buy_price)
+            if not is_valid_number(fx_rate):
+                status = "FX_ERROR"
+            else:
+                current_native_value = qty
+                current_krw_value = qty * fx_rate
+
+        # -------------------------------------------------
+        # C. 티커 없는 KRW 자산
+        #     수량 × 매수단가(또는 현재 잔액)를 현재가치로 사용
+        # -------------------------------------------------
         else:
-            buy_fx = np.nan
-        implied_buy_fx.append(buy_fx)
+            valuation_type = "MANUAL_KRW"
+            quote_ccy = "KRW"
+            fx_rate = 1.0
+            current_price = avg_buy_price
+            current_native_value = qty * avg_buy_price
+            current_krw_value = current_native_value
 
-        # 가격효과 / 환율효과 분리 (둘의 합 = 총 손익, 단 buy_fx 추정이 유효할 때)
+        # -------------------------------------------------
+        # 원가 / 수익 분석
+        # -------------------------------------------------
+        native_cost = np.nan
+        implied_buy_fx = np.nan
+        local_profit = np.nan
+        local_return = np.nan
+        price_effect_krw = 0.0
+        fx_effect_krw = 0.0
+
+        # 시장성 외화자산
         if (
-            np.isfinite(value)
-            and np.isfinite(price)
-            and np.isfinite(fx)
-            and np.isfinite(buy_fx)
+            valuation_type == "MARKET"
+            and quote_ccy not in {"", "KRW"}
             and qty > 0
-            and buy_price > 0
+            and avg_buy_price > 0
         ):
-            price_pnl = qty * (price - buy_price) * buy_fx
-            fx_pnl = qty * price * (fx - buy_fx)
+            native_cost = qty * avg_buy_price
+
+            if stored_buy_fx > 0:
+                implied_buy_fx = stored_buy_fx
+            elif fixed_principal > 0 and native_cost > 0:
+                implied_buy_fx = fixed_principal / native_cost
+
+            if is_valid_number(current_native_value):
+                local_profit = current_native_value - native_cost
+                local_return = (
+                    local_profit / native_cost * 100
+                    if native_cost > 0 else np.nan
+                )
+
+            if (
+                is_valid_number(implied_buy_fx)
+                and is_valid_number(current_price)
+                and is_valid_number(fx_rate)
+            ):
+                price_effect_krw = (
+                    (current_price - avg_buy_price)
+                    * qty
+                    * implied_buy_fx
+                )
+                fx_effect_krw = (
+                    current_price
+                    * qty
+                    * (fx_rate - implied_buy_fx)
+                )
+
+        # 외화 현금/RP: 원화 손익은 환율+잔액 변화 효과로 표시
+        elif valuation_type == "FOREIGN_CASH":
+            native_cost = qty
+
+            if stored_buy_fx > 0:
+                implied_buy_fx = stored_buy_fx
+            elif fixed_principal > 0 and qty > 0:
+                implied_buy_fx = fixed_principal / qty
+
+            if (
+                is_valid_number(current_krw_value)
+                and fixed_principal > 0
+            ):
+                fx_effect_krw = current_krw_value - fixed_principal
+
+        # KRW / 금 / 국내자산은 환율효과를 별도 분리하지 않음
         else:
-            price_pnl = np.nan
-            fx_pnl = np.nan
-        price_effects.append(price_pnl)
-        fx_effects.append(fx_pnl)
+            if qty > 0 and avg_buy_price > 0:
+                native_cost = qty * avg_buy_price
 
-    df["현재가"] = prices
-    df["실제시세통화"] = quote_ccys
-    df["적용환율(KRW)"] = fx_rates
-    df["가격상태"] = statuses
-    df["현재평가금액(KRW)"] = current_values
+            if (
+                is_valid_number(current_krw_value)
+                and fixed_principal > 0
+            ):
+                price_effect_krw = current_krw_value - fixed_principal
 
-    # 시세 오류는 0으로 숨기지 않고 NaN으로 남긴 뒤 화면에서 경고
-    df["수익금(KRW)"] = df["현재평가금액(KRW)"] - df["투입원금(KRW)"]
-    df["추정매수환율"] = implied_buy_fx
-    df["가격효과(KRW)"] = price_effects
-    df["환율효과(KRW)"] = fx_effects
+        profit_krw = (
+            current_krw_value - fixed_principal
+            if is_valid_number(current_krw_value)
+            else np.nan
+        )
 
-    # 합계에서는 시세 오류 종목의 NaN을 자동 제외하므로, 반드시 화면 경고를 함께 표시
-    total_p = df["투입원금(KRW)"].sum()
-    total_c = df["현재평가금액(KRW)"].sum(skipna=True)
+        return_pct = (
+            profit_krw / fixed_principal * 100
+            if fixed_principal > 0 and is_valid_number(profit_krw)
+            else np.nan
+        )
 
-    # -----------------------------------------------------
-    # 월별 History: 한국시간 기준, 그 달 '첫 접속 시' 1회 기록
-    # -----------------------------------------------------
-    try:
-        h_worksheet = spreadsheet.worksheet("History")
-    except Exception:
-        h_worksheet = spreadsheet.add_worksheet(title="History", rows="200", cols="5")
-        h_worksheet.append_row(["날짜", "총 투입 원금", "현재 총 자산"])
+        evaluated_rows.append({
+            "소유자": owner,
+            "대분류": major,
+            "소분류": minor,
+            "자산/종목명": name,
+            "금융사/거래소": institution,
+            "티커(기호)": ticker,
+            "매수통화": buy_ccy,
+            "시세통화": quote_ccy,
+            "보유수량": qty,
+            "매수단가": avg_buy_price,
+            "원통화취득원가": native_cost,
+            "실제투입원금(KRW)": fixed_principal,
+            "현재가": current_price,
+            "현재환율": fx_rate,
+            "현재평가액(원통화)": current_native_value,
+            "현재평가금액(KRW)": current_krw_value,
+            "수익금(KRW)": profit_krw,
+            "수익률(%)": return_pct,
+            "원통화수익": local_profit,
+            "원통화수익률(%)": local_return,
+            "입력취득환율": stored_buy_fx if stored_buy_fx > 0 else np.nan,
+            "추정취득환율": implied_buy_fx,
+            "가격효과(KRW)": price_effect_krw,
+            "환율효과(KRW)": fx_effect_krw,
+            "평가방식": valuation_type,
+            "상태": status,
+        })
 
-    h_data = h_worksheet.get_all_records()
-    h_df = pd.DataFrame(h_data)
+    result = pd.DataFrame(evaluated_rows)
 
-    now = datetime.now(KST)
-    current_month = now.strftime("%Y-%m")
-    should_append = True
-
-    if not h_df.empty and "날짜" in h_df.columns:
-        parsed_dates = pd.to_datetime(h_df["날짜"], errors="coerce")
-        existing_months = parsed_dates.dt.strftime("%Y-%m").dropna().tolist()
-        should_append = current_month not in existing_months
-
-    # 시세 오류가 있으면 잘못된 월 스냅샷을 남기지 않음
-    has_price_error = df["현재평가금액(KRW)"].isna().any()
-    if should_append and not has_price_error:
-        h_worksheet.append_row([
-            now.strftime("%Y-%m-%d"),
-            int(round(total_p)),
-            int(round(total_c)),
-        ])
-        h_df = pd.DataFrame(h_worksheet.get_all_records())
-
-    usd_krw_rate = get_fx_to_krw("USD")
-    return df, usd_krw_rate, h_df
-
-
-with st.spinner("🔄 데이터를 불러오는 중입니다..."):
-    df, usd_krw_rate, history_df = load_data()
-
-# ---------------------------------------------------------
-# 4. 데이터 오류 경고
-# ---------------------------------------------------------
-error_df = df[df["현재평가금액(KRW)"].isna()].copy()
-if not error_df.empty:
-    names = ", ".join(error_df["자산/종목명"].astype(str).tolist())
-    st.error(
-        "⚠️ 시세 또는 환율을 불러오지 못한 종목이 있어 총자산에서 제외되었습니다: "
-        + names
-        + "\n\n아래 '시세 진단' 표에서 티커/시세통화를 확인해주세요."
+    total_current = result["현재평가금액(KRW)"].sum(
+        min_count=1
     )
 
-# ---------------------------------------------------------
-# 5. 화면 상단 요약 지표 및 히스토리
-# ---------------------------------------------------------
-total_principal = df["투입원금(KRW)"].sum()
-total_current = df["현재평가금액(KRW)"].sum(skipna=True)
-total_profit = total_current - total_principal
-total_rate = (total_profit / total_principal) * 100 if total_principal > 0 else 0
+    if is_valid_number(total_current) and total_current > 0:
+        result["자산비중(%)"] = (
+            result["현재평가금액(KRW)"] / total_current * 100
+        )
+    else:
+        result["자산비중(%)"] = 0.0
 
-col1, col2, col3 = st.columns([1, 1, 1.8])
-col1.metric(label="💰 총 투입 원금", value=f"{total_principal:,.0f}원")
-col2.metric(
-    label="📈 현재 총 자산",
-    value=f"{total_current:,.0f}원",
-    delta=f"{total_profit:+,.0f}원 ({total_rate:+.2f}%)",
+    return result
+
+
+# =========================================================
+# 5. 데이터 로딩
+# =========================================================
+try:
+    with st.spinner("📡 구글시트·시세·환율 데이터를 불러오는 중입니다..."):
+        raw_df = load_asset_sheet()
+        df = evaluate_assets(raw_df)
+
+except Exception as e:
+    st.error(f"데이터를 불러오지 못했습니다: {e}")
+    st.stop()
+
+
+# =========================================================
+# 6. 전체 요약
+# =========================================================
+total_principal = df["실제투입원금(KRW)"].sum()
+total_current = df["현재평가금액(KRW)"].sum(min_count=1)
+total_profit = total_current - total_principal
+total_return = (
+    total_profit / total_principal * 100
+    if total_principal > 0
+    else 0
 )
 
-with col3:
-    if not history_df.empty:
-        latest_date = history_df["날짜"].iloc[-1]
-        with st.expander(f"📜 월별 자산 성장 기록 (최근: {latest_date})", expanded=False):
-            h_display = history_df.copy().sort_values(by="날짜", ascending=False)
-            for col in ["총 투입 원금", "현재 총 자산"]:
-                if col in h_display.columns:
-                    h_display[col] = pd.to_numeric(h_display[col], errors="coerce").map("{:,.0f}원".format)
-            st.dataframe(h_display, use_container_width=True, hide_index=True, height=180)
-    else:
-        st.info("아직 기록된 히스토리가 없습니다.")
+usd_krw = get_fx_to_krw("USD")
 
-if np.isfinite(usd_krw_rate):
-    st.markdown(f"*🔎 적용 USD/KRW 환율: 1달러 = {usd_krw_rate:,.2f}원*")
-else:
-    st.markdown("*🔎 USD/KRW 환율 조회 실패*")
-st.markdown("---")
+# 해당 월 첫 접속 시 History 기록
+history_saved = save_monthly_history(
+    total_principal,
+    total_current,
+)
 
-# ---------------------------------------------------------
-# 6. 종목별 상세 현황
-# ---------------------------------------------------------
+# 저장 후 History 로딩
+history_df = load_history()
+
+m1, m2, m3, m4 = st.columns(4)
+
+m1.metric(
+    "💰 실제 투입 원금",
+    f"{total_principal:,.0f}원",
+)
+
+m2.metric(
+    "📈 현재 총 자산",
+    f"{total_current:,.0f}원",
+    delta=f"{total_profit:+,.0f}원",
+)
+
+m3.metric(
+    "📊 전체 수익률",
+    f"{total_return:+.2f}%",
+)
+
+m4.metric(
+    "💱 USD/KRW",
+    f"{usd_krw:,.2f}원" if is_valid_number(usd_krw) else "조회 실패",
+)
+
+st.divider()
+
+
+# =========================================================
+# 7. 소유자별 요약
+# =========================================================
+st.subheader("👥 소유자별 자산")
+
+owner_summary = (
+    df.groupby("소유자", as_index=False)
+    .agg({
+        "실제투입원금(KRW)": "sum",
+        "현재평가금액(KRW)": "sum",
+    })
+)
+
+owner_summary["수익금(KRW)"] = (
+    owner_summary["현재평가금액(KRW)"]
+    - owner_summary["실제투입원금(KRW)"]
+)
+
+owner_summary["수익률(%)"] = np.where(
+    owner_summary["실제투입원금(KRW)"] > 0,
+    owner_summary["수익금(KRW)"]
+    / owner_summary["실제투입원금(KRW)"] * 100,
+    0,
+)
+
+owner_display = owner_summary.copy()
+
+for col in [
+    "실제투입원금(KRW)",
+    "현재평가금액(KRW)",
+    "수익금(KRW)",
+]:
+    owner_display[col] = owner_display[col].map(
+        lambda x: f"{x:,.0f}원"
+    )
+
+owner_display["수익률(%)"] = owner_display["수익률(%)"].map(
+    lambda x: f"{x:+.2f}%"
+)
+
+st.dataframe(
+    owner_display,
+    use_container_width=True,
+    hide_index=True,
+)
+
+st.divider()
+
+
+# =========================================================
+# 8. 자산 분류별 비중
+# =========================================================
+left, right = st.columns(2)
+
+with left:
+    st.subheader("📁 대분류별")
+    category_summary = (
+        df.groupby("대분류", as_index=False)
+        .agg({"현재평가금액(KRW)": "sum"})
+        .sort_values("현재평가금액(KRW)", ascending=False)
+    )
+
+    category_summary["비중(%)"] = (
+        category_summary["현재평가금액(KRW)"]
+        / total_current * 100
+        if total_current > 0
+        else 0
+    )
+
+    cat_show = category_summary.copy()
+    cat_show["현재평가금액(KRW)"] = cat_show[
+        "현재평가금액(KRW)"
+    ].map(lambda x: f"{x:,.0f}원")
+    cat_show["비중(%)"] = cat_show["비중(%)"].map(
+        lambda x: f"{x:.1f}%"
+    )
+
+    st.dataframe(
+        cat_show,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+with right:
+    st.subheader("🧩 자산유형별")
+    minor_summary = (
+        df.groupby("소분류", as_index=False)
+        .agg({"현재평가금액(KRW)": "sum"})
+        .sort_values("현재평가금액(KRW)", ascending=False)
+    )
+
+    minor_summary["비중(%)"] = (
+        minor_summary["현재평가금액(KRW)"]
+        / total_current * 100
+        if total_current > 0
+        else 0
+    )
+
+    minor_show = minor_summary.copy()
+    minor_show["현재평가금액(KRW)"] = minor_show[
+        "현재평가금액(KRW)"
+    ].map(lambda x: f"{x:,.0f}원")
+    minor_show["비중(%)"] = minor_show["비중(%)"].map(
+        lambda x: f"{x:.1f}%"
+    )
+
+    st.dataframe(
+        minor_show,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+st.divider()
+
+
+# =========================================================
+# 9. 종목별 상세 현황
+# =========================================================
 st.subheader("📋 종목별 상세 현황")
 
 display_df = df[[
     "소유자",
     "자산/종목명",
-    "투입원금(KRW)",
+    "금융사/거래소",
+    "매수통화",
+    "실제투입원금(KRW)",
     "현재평가금액(KRW)",
     "수익금(KRW)",
+    "수익률(%)",
+    "자산비중(%)",
+    "상태",
 ]].copy()
 
-display_df["수익률(%)"] = np.where(
-    (display_df["투입원금(KRW)"] > 0) & display_df["현재평가금액(KRW)"].notna(),
-    (display_df["수익금(KRW)"] / display_df["투입원금(KRW)"]) * 100,
-    np.nan,
+display_df = display_df.sort_values(
+    "현재평가금액(KRW)",
+    ascending=False,
 )
-display_df["자산비중(%)"] = np.where(
-    display_df["현재평가금액(KRW)"].notna() & (total_current > 0),
-    (display_df["현재평가금액(KRW)"] / total_current) * 100,
-    np.nan,
-)
-display_df = display_df.sort_values(by="현재평가금액(KRW)", ascending=False, na_position="last")
 
-formatted_df = display_df.copy()
-for col in ["투입원금(KRW)", "현재평가금액(KRW)", "수익금(KRW)"]:
-    formatted_df[col] = formatted_df[col].apply(
-        lambda x: "조회실패" if pd.isna(x) else f"{x:,.0f}"
+for col in [
+    "실제투입원금(KRW)",
+    "현재평가금액(KRW)",
+    "수익금(KRW)",
+]:
+    display_df[col] = display_df[col].map(
+        lambda x: f"{x:,.0f}" if is_valid_number(x) else "-"
     )
-formatted_df["수익률(%)"] = formatted_df["수익률(%)"].apply(
-    lambda x: "-" if pd.isna(x) else f"{x:+.2f}%"
-)
-formatted_df["자산비중(%)"] = formatted_df["자산비중(%)"].apply(
-    lambda x: "-" if pd.isna(x) else f"{x:.1f}%"
+
+display_df["수익률(%)"] = display_df["수익률(%)"].map(
+    lambda x: f"{x:+.2f}%" if is_valid_number(x) else "-"
 )
 
-total_row = pd.DataFrame({
-    "소유자": ["-"],
-    "자산/종목명": ["🔥총합🔥"],
-    "투입원금(KRW)": [f"{total_principal:,.0f}"],
-    "현재평가금액(KRW)": [f"{total_current:,.0f}"],
-    "수익금(KRW)": [f"{total_profit:+,.0f}"],
-    "수익률(%)": [f"{total_rate:+.2f}%"],
-    "자산비중(%)": ["100.0%"],
-})
-formatted_df = pd.concat([formatted_df, total_row], ignore_index=True)
+display_df["자산비중(%)"] = display_df["자산비중(%)"].map(
+    lambda x: f"{x:.1f}%" if is_valid_number(x) else "-"
+)
+
+total_row = pd.DataFrame([{
+    "소유자": "-",
+    "자산/종목명": "🔥 총합",
+    "금융사/거래소": "-",
+    "매수통화": "-",
+    "실제투입원금(KRW)": f"{total_principal:,.0f}",
+    "현재평가금액(KRW)": f"{total_current:,.0f}",
+    "수익금(KRW)": f"{total_profit:+,.0f}",
+    "수익률(%)": f"{total_return:+.2f}%",
+    "자산비중(%)": "100.0%",
+    "상태": "-",
+}])
+
+display_df = pd.concat(
+    [display_df, total_row],
+    ignore_index=True,
+)
 
 st.dataframe(
-    formatted_df,
+    display_df,
     use_container_width=True,
     hide_index=True,
-    height=(len(display_df) * 36) + 80,
+    height=min(900, 80 + len(display_df) * 35),
 )
-st.markdown("---")
 
-# ---------------------------------------------------------
-# 7. 대분류별 자산 비중
-# ---------------------------------------------------------
-st.subheader("📁 대분류별 자산 비중")
 
-cat_df = df.groupby("대분류").agg({
-    "현재평가금액(KRW)": "sum",
-    "자산/종목명": lambda x: ", ".join(dict.fromkeys(x.astype(str).str.strip())),
-}).reset_index()
+# =========================================================
+# 10. 외화자산 상세 분석
+# =========================================================
+foreign_df = df[
+    (df["매수통화"].isin(["USD", "USDT", "JPY", "EUR", "CNY", "HKD", "GBP", "CAD", "AUD", "SGD", "CHF"]))
+].copy()
 
-cat_df["비중(%)"] = (
-    (cat_df["현재평가금액(KRW)"] / total_current) * 100
-    if total_current > 0
-    else 0
-)
-cat_df = cat_df.sort_values(by="현재평가금액(KRW)", ascending=False)
-cat_df = cat_df[["대분류", "자산/종목명", "현재평가금액(KRW)", "비중(%)"]]
-cat_df.columns = ["대분류", "소분류 종류", "현재평가금액", "비중(%)"]
-cat_df["현재평가금액"] = cat_df["현재평가금액"].map("{:,.0f}원".format)
-cat_df["비중(%)"] = cat_df["비중(%)"].map("{:.1f}%".format)
-st.dataframe(cat_df, use_container_width=True, hide_index=True)
+with st.expander("💱 외화자산 원통화·환율 분석", expanded=False):
+    if foreign_df.empty:
+        st.info("외화자산이 없습니다.")
+    else:
+        foreign_show = foreign_df[[
+            "소유자",
+            "자산/종목명",
+            "티커(기호)",
+            "시세통화",
+            "보유수량",
+            "매수단가",
+            "현재가",
+            "추정취득환율",
+            "현재환율",
+            "가격효과(KRW)",
+            "환율효과(KRW)",
+            "수익금(KRW)",
+        ]].copy()
 
-st.markdown("---")
+        def fmt_num(x, digits=2):
+            if not is_valid_number(x):
+                return "-"
+            return f"{float(x):,.{digits}f}"
 
-# ---------------------------------------------------------
-# 8. 시세/환율 진단표
-# ---------------------------------------------------------
-with st.expander("🧪 시세 진단 (외국주식/환율이 이상할 때 여기부터 확인)", expanded=False):
-    diag = df[[
-        "자산/종목명",
-        "티커(기호)",
-        "매수통화",
-        "실제시세통화",
-        "현재가",
-        "적용환율(KRW)",
-        "가격상태",
-        "현재평가금액(KRW)",
-    ]].copy()
+        foreign_show["보유수량"] = foreign_show["보유수량"].map(
+            lambda x: fmt_num(x, 8).rstrip("0").rstrip(".")
+        )
+        foreign_show["매수단가"] = foreign_show["매수단가"].map(
+            lambda x: fmt_num(x, 4)
+        )
+        foreign_show["현재가"] = foreign_show["현재가"].map(
+            lambda x: fmt_num(x, 4)
+        )
+        foreign_show["추정취득환율"] = foreign_show[
+            "추정취득환율"
+        ].map(
+            lambda x: f"{x:,.2f}" if is_valid_number(x) else "-"
+        )
+        foreign_show["현재환율"] = foreign_show[
+            "현재환율"
+        ].map(
+            lambda x: f"{x:,.2f}" if is_valid_number(x) else "-"
+        )
 
-    diag["현재가"] = diag["현재가"].apply(
-        lambda x: "-" if pd.isna(x) else f"{x:,.6f}".rstrip("0").rstrip(".")
+        for col in [
+            "가격효과(KRW)",
+            "환율효과(KRW)",
+            "수익금(KRW)",
+        ]:
+            foreign_show[col] = foreign_show[col].map(
+                lambda x: f"{x:+,.0f}" if is_valid_number(x) else "-"
+            )
+
+        st.dataframe(
+            foreign_show,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.caption(
+            "※ 시트에 `평균취득환율`이 있으면 그 값을 우선 사용합니다. "
+            "비어 있으면 `실제투입원금(KRW) ÷ 원통화 취득원가`로 추정합니다. "
+            "수수료가 실제투입원금에 포함돼 있으면 추정 환율에 일부 섞일 수 있습니다."
+        )
+
+
+# =========================================================
+# 11. 월별 History
+# =========================================================
+with st.expander("📜 월별 자산 성장 기록", expanded=False):
+    if history_df.empty:
+        st.info("아직 History 기록이 없습니다.")
+    else:
+        h = history_df.copy()
+
+        for col in ["총 투입 원금", "현재 총 자산"]:
+            if col in h.columns:
+                h[col] = h[col].map(to_number)
+
+        if (
+            "총 투입 원금" in h.columns
+            and "현재 총 자산" in h.columns
+        ):
+            h["손익"] = (
+                h["현재 총 자산"]
+                - h["총 투입 원금"]
+            )
+
+        h = h.sort_values("날짜", ascending=False)
+
+        h_show = h.copy()
+        for col in ["총 투입 원금", "현재 총 자산", "손익"]:
+            if col in h_show.columns:
+                h_show[col] = h_show[col].map(
+                    lambda x: f"{x:,.0f}원"
+                )
+
+        st.dataframe(
+            h_show,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.caption(
+            "History는 해당 월에 앱을 처음 연 시점의 평가액을 월별 1회 기록합니다."
+        )
+
+
+# =========================================================
+# 12. 데이터 품질 / 시세 진단
+# =========================================================
+with st.expander("🧪 데이터·시세 진단", expanded=False):
+    problems = df[
+        (df["상태"] != "OK")
+        | (df["실제투입원금(KRW)"] <= 0)
+    ].copy()
+
+    if problems.empty:
+        st.success("현재 시트에서 치명적인 누락이나 시세 조회 오류가 발견되지 않았습니다.")
+    else:
+        st.warning(
+            f"확인이 필요한 항목이 {len(problems)}개 있습니다."
+        )
+
+        diag = problems[[
+            "소유자",
+            "자산/종목명",
+            "티커(기호)",
+            "매수통화",
+            "평가방식",
+            "실제투입원금(KRW)",
+            "상태",
+        ]].copy()
+
+        diag["실제투입원금(KRW)"] = diag[
+            "실제투입원금(KRW)"
+        ].map(lambda x: f"{x:,.0f}")
+
+        st.dataframe(
+            diag,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown(
+        """
+**현재 시트 입력 규칙**
+
+- `실제투입원금(KRW)` : 매수 당시 실제로 들어간 원화. **현재 환율로 다시 계산하지 않음**
+- 선택사항: J열을 `평균취득환율`로 바꾸면 외화자산의 실제 평균 환율을 직접 입력 가능
+- 미국주식/코인 : `매수단가`는 USD 기준 평균매수가
+- 국내주식/ETF : `매수단가`는 KRW 기준 평균매수가
+- 외화 현금/RP : `보유수량`에 실제 USD 등 외화 잔액 입력
+- 티커 없는 KRW 자산 : `보유수량 × 매수단가`를 현재가치로 사용
+- 금(`GC=F`) : `보유수량`은 g 단위로 입력
+        """
     )
-    diag["적용환율(KRW)"] = diag["적용환율(KRW)"].apply(
-        lambda x: "조회실패" if pd.isna(x) else f"{x:,.4f}"
-    )
-    diag["현재평가금액(KRW)"] = diag["현재평가금액(KRW)"].apply(
-        lambda x: "조회실패" if pd.isna(x) else f"{x:,.0f}원"
-    )
-    st.dataframe(diag, use_container_width=True, hide_index=True)
-
-# ---------------------------------------------------------
-# 9. 외화자산 손익 분해 (참고용)
-# ---------------------------------------------------------
-with st.expander("💱 외화자산 손익 분해 (가격효과 vs 환율효과)", expanded=False):
-    pnl = df[[
-        "자산/종목명",
-        "매수단가",
-        "현재가",
-        "추정매수환율",
-        "적용환율(KRW)",
-        "가격효과(KRW)",
-        "환율효과(KRW)",
-        "수익금(KRW)",
-    ]].copy()
-    pnl = pnl[pnl["추정매수환율"].notna()].copy()
-
-    for col in ["추정매수환율", "적용환율(KRW)"]:
-        pnl[col] = pnl[col].apply(lambda x: "-" if pd.isna(x) else f"{x:,.2f}")
-    for col in ["가격효과(KRW)", "환율효과(KRW)", "수익금(KRW)"]:
-        pnl[col] = pnl[col].apply(lambda x: "-" if pd.isna(x) else f"{x:+,.0f}원")
-
-    st.caption("※ 추정매수환율 = 투입원금(KRW) ÷ (보유수량 × 매수단가). 수수료·부분매도·다회매수가 복잡하면 참고값입니다.")
-    st.dataframe(pnl, use_container_width=True, hide_index=True)
