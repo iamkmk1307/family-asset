@@ -39,7 +39,8 @@ with top_left:
 
 st.caption(
     "외화자산은 원통화 기준 원가를 보존하고, 현재 평가액만 최신 환율로 KRW 환산합니다. "
-    "`실제투입원금(KRW)`은 환율이 바뀌어도 변하지 않는 고정 원금으로 사용합니다."
+    "`실제투입원금(KRW)`은 환율이 바뀌어도 변하지 않는 고정 원금으로 사용합니다. "
+    "`배당수익(USD)`은 누적 세후 달러 배당을 원본 통화 그대로 기록하며 현재 총 자산과 중복 합산하지 않습니다."
 )
 st.divider()
 
@@ -273,6 +274,14 @@ def load_asset_sheet():
         else:
             df["평균취득환율"] = ""
 
+    # 선택 컬럼: 누적 세후 달러 배당수익(USD)
+    # 과거 헤더 `배당금`도 자동 호환
+    if "배당수익(USD)" not in df.columns:
+        if "배당금" in df.columns:
+            df["배당수익(USD)"] = df["배당금"]
+        else:
+            df["배당수익(USD)"] = 0
+
     # 빈 행 제거
     df = df[
         df["자산/종목명"].astype(str).str.strip() != ""
@@ -289,7 +298,7 @@ def load_asset_sheet():
     # 숫자 정리
     numeric_cols = [
         "보유수량", "매수단가", "취득원가",
-        "평균취득환율", "실제투입원금(KRW)"
+        "평균취득환율", "실제투입원금(KRW)", "배당수익(USD)"
     ]
     for col in numeric_cols:
         df[col] = df[col].map(to_number)
@@ -305,19 +314,25 @@ def load_history():
         worksheet = spreadsheet.worksheet(HISTORY_SHEET_NAME)
     except Exception:
         return pd.DataFrame(
-            columns=["날짜", "총 투입 원금", "현재 총 자산"]
+            columns=["날짜", "총 투입 원금", "현재 총 자산", "누적 배당수익(USD)"]
         )
 
     rows = worksheet.get_all_values()
     if not rows:
         return pd.DataFrame(
-            columns=["날짜", "총 투입 원금", "현재 총 자산"]
+            columns=["날짜", "총 투입 원금", "현재 총 자산", "누적 배당수익(USD)"]
         )
 
-    return pd.DataFrame(rows[1:], columns=rows[0])
+    header = rows[0]
+    width = len(header)
+    normalized_rows = [
+        (r + [""] * width)[:width]
+        for r in rows[1:]
+    ]
+    return pd.DataFrame(normalized_rows, columns=header)
 
 
-def save_monthly_history(total_principal, total_current):
+def save_monthly_history(total_principal, total_current, total_dividend_usd):
     """
     해당 월의 기록이 없을 때만 1회 저장.
     날짜는 월 구분을 위해 YYYY-MM-01 형태로 저장합니다.
@@ -334,8 +349,13 @@ def save_monthly_history(total_principal, total_current):
                 cols=5,
             )
             worksheet.append_row(
-                ["날짜", "총 투입 원금", "현재 총 자산"]
+                ["날짜", "총 투입 원금", "현재 총 자산", "누적 배당수익(USD)"]
             )
+
+        # 기존 History 시트도 배당수익 열을 자동 확장
+        header = worksheet.row_values(1)
+        if "누적 배당수익(USD)" not in header:
+            worksheet.update_cell(1, 4, "누적 배당수익(USD)")
 
         rows = worksheet.get_all_values()
 
@@ -361,6 +381,7 @@ def save_monthly_history(total_principal, total_current):
                 month_label,
                 int(round(total_principal)),
                 int(round(total_current)),
+                round(float(total_dividend_usd), 2),
             ])
 
         return True
@@ -402,6 +423,7 @@ def evaluate_assets(raw_df):
         qty = to_number(row["보유수량"])
         avg_buy_price = to_number(row["매수단가"])
         fixed_principal = to_number(row["실제투입원금(KRW)"])
+        dividend_usd = to_number(row.get("배당수익(USD)", 0))
         stored_buy_fx = to_number(row.get("평균취득환율", 0))
 
         current_price = np.nan
@@ -569,6 +591,7 @@ def evaluate_assets(raw_df):
             "매수단가": avg_buy_price,
             "원통화취득원가": native_cost,
             "실제투입원금(KRW)": fixed_principal,
+            "배당수익(USD)": dividend_usd,
             "현재가": current_price,
             "현재환율": fx_rate,
             "현재평가액(원통화)": current_native_value,
@@ -619,6 +642,7 @@ except Exception as e:
 # =========================================================
 total_principal = df["실제투입원금(KRW)"].sum()
 total_current = df["현재평가금액(KRW)"].sum(min_count=1)
+total_dividend_usd = df["배당수익(USD)"].sum()
 total_profit = total_current - total_principal
 total_return = (
     total_profit / total_principal * 100
@@ -632,12 +656,13 @@ usd_krw = get_fx_to_krw("USD")
 history_saved = save_monthly_history(
     total_principal,
     total_current,
+    total_dividend_usd,
 )
 
 # 저장 후 History 로딩
 history_df = load_history()
 
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 
 m1.metric(
     "💰 실제 투입 원금",
@@ -656,6 +681,15 @@ m3.metric(
 )
 
 m4.metric(
+    "💵 누적 배당수익",
+    f"${total_dividend_usd:,.2f}",
+    delta=(
+        f"약 {total_dividend_usd * usd_krw:,.0f}원"
+        if is_valid_number(usd_krw) else None
+    ),
+)
+
+m5.metric(
     "💱 USD/KRW",
     f"{usd_krw:,.2f}원" if is_valid_number(usd_krw) else "조회 실패",
 )
@@ -673,6 +707,7 @@ owner_summary = (
     .agg({
         "실제투입원금(KRW)": "sum",
         "현재평가금액(KRW)": "sum",
+        "배당수익(USD)": "sum",
     })
 )
 
@@ -698,6 +733,10 @@ for col in [
     owner_display[col] = owner_display[col].map(
         lambda x: f"{x:,.0f}원"
     )
+
+owner_display["배당수익(USD)"] = owner_display["배당수익(USD)"].map(
+    lambda x: f"${x:,.2f}"
+)
 
 owner_display["수익률(%)"] = owner_display["수익률(%)"].map(
     lambda x: f"{x:+.2f}%"
@@ -791,6 +830,7 @@ display_df = df[[
     "실제투입원금(KRW)",
     "현재평가금액(KRW)",
     "수익금(KRW)",
+    "배당수익(USD)",
     "수익률(%)",
     "자산비중(%)",
     "상태",
@@ -810,6 +850,10 @@ for col in [
         lambda x: f"{x:,.0f}" if is_valid_number(x) else "-"
     )
 
+display_df["배당수익(USD)"] = display_df["배당수익(USD)"].map(
+    lambda x: f"${x:,.2f}" if is_valid_number(x) else "-"
+)
+
 display_df["수익률(%)"] = display_df["수익률(%)"].map(
     lambda x: f"{x:+.2f}%" if is_valid_number(x) else "-"
 )
@@ -826,6 +870,7 @@ total_row = pd.DataFrame([{
     "실제투입원금(KRW)": f"{total_principal:,.0f}",
     "현재평가금액(KRW)": f"{total_current:,.0f}",
     "수익금(KRW)": f"{total_profit:+,.0f}",
+    "배당수익(USD)": f"${total_dividend_usd:,.2f}",
     "수익률(%)": f"{total_return:+.2f}%",
     "자산비중(%)": "100.0%",
     "상태": "-",
@@ -868,6 +913,7 @@ with st.expander("💱 외화자산 원통화·환율 분석", expanded=False):
             "가격효과(KRW)",
             "환율효과(KRW)",
             "수익금(KRW)",
+            "배당수익(USD)",
         ]].copy()
 
         def fmt_num(x, digits=2):
@@ -904,6 +950,10 @@ with st.expander("💱 외화자산 원통화·환율 분석", expanded=False):
                 lambda x: f"{x:+,.0f}" if is_valid_number(x) else "-"
             )
 
+        foreign_show["배당수익(USD)"] = foreign_show["배당수익(USD)"].map(
+            lambda x: f"${x:,.2f}" if is_valid_number(x) else "-"
+        )
+
         st.dataframe(
             foreign_show,
             use_container_width=True,
@@ -926,7 +976,7 @@ with st.expander("📜 월별 자산 성장 기록", expanded=False):
     else:
         h = history_df.copy()
 
-        for col in ["총 투입 원금", "현재 총 자산"]:
+        for col in ["총 투입 원금", "현재 총 자산", "누적 배당수익(USD)"]:
             if col in h.columns:
                 h[col] = h[col].map(to_number)
 
@@ -947,6 +997,11 @@ with st.expander("📜 월별 자산 성장 기록", expanded=False):
                 h_show[col] = h_show[col].map(
                     lambda x: f"{x:,.0f}원"
                 )
+
+        if "누적 배당수익(USD)" in h_show.columns:
+            h_show["누적 배당수익(USD)"] = h_show["누적 배당수익(USD)"].map(
+                lambda x: f"${x:,.2f}"
+            )
 
         st.dataframe(
             h_show,
@@ -1000,6 +1055,9 @@ with st.expander("🧪 데이터·시세 진단", expanded=False):
 **현재 시트 입력 규칙**
 
 - `실제투입원금(KRW)` : 매수 당시 실제로 들어간 원화. **현재 환율로 다시 계산하지 않음**
+- `배당수익(USD)` : 해당 자산에서 지금까지 받은 **세후 누적 달러 배당액**을 USD 그대로 입력
+- 배당을 재투자해도 `실제투입원금(KRW)`에는 더하지 않음
+- 대시보드에서는 USD 배당을 그대로 표시하고, 참고용으로 현재 USD/KRW 환율 기준 원화 환산액도 함께 표시
 - 선택사항: J열을 `평균취득환율`로 바꾸면 외화자산의 실제 평균 환율을 직접 입력 가능
 - 미국주식/코인 : `매수단가`는 USD 기준 평균매수가
 - 국내주식/ETF : `매수단가`는 KRW 기준 평균매수가
