@@ -3,5 +3,5 @@ gspread
 google-auth
 pandas
 numpy
-yfinance
+yfinance[repair]
 plotly
