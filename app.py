@@ -685,30 +685,57 @@ if holdings_df.empty:
 # 8. 상단 지표
 # =========================================================
 base, deposits, withdrawals = benchmark_from_flows(flows)
-benchmark = base + deposits - withdrawals
+net_external = deposits - withdrawals
+performance_base = base + net_external
+
 current_total = float(holdings_df["현재평가액(KRW)"].sum())
-current_cost = float(holdings_df.loc[holdings_df["상태"] != "CASH", "취득원가(KRW)"].sum())
-unrealized_total = float(holdings_df["미실현손익(KRW)"].sum())
+investment_mask = holdings_df["상태"] != "CASH"
+investment_value = float(holdings_df.loc[investment_mask, "현재평가액(KRW)"].sum())
+investment_cost = float(holdings_df.loc[investment_mask, "취득원가(KRW)"].sum())
+cash_total = current_total - investment_value
+
+unrealized_total = float(holdings_df.loc[investment_mask, "미실현손익(KRW)"].sum())
 realized_total = float(realized_df["실현손익(KRW)"].sum()) if not realized_df.empty else 0.0
 income_total = float(income_df["금액(KRW)"].sum()) if not income_df.empty else 0.0
-since_start = current_total - benchmark if benchmark > 0 else np.nan
-since_start_pct = since_start / benchmark * 100 if benchmark > 0 else np.nan
 
+period_performance = current_total - performance_base if performance_base > 0 else np.nan
+period_performance_pct = (period_performance / performance_base * 100) if performance_base > 0 else np.nan
+unrealized_pct = (unrealized_total / investment_cost * 100) if investment_cost > 0 else np.nan
+
+# 1행: 10/1 이후 가족 전체 자산 흐름
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("현재 총자산", won(current_total))
-m2.metric("현재 보유분 취득원가", won(current_cost))
-m3.metric("미실현손익", won(unrealized_total), pct(unrealized_total / current_cost * 100) if current_cost > 0 else None)
-m4.metric("누적 실현손익", won(realized_total))
+m1.metric("10/1 시작자산", won(base))
+m2.metric("이후 순외부투입", won(net_external))
+m3.metric("현재 총자산", won(current_total))
+m4.metric(
+    "10/1 이후 순성과",
+    won(period_performance),
+    pct(period_performance_pct) if is_num(period_performance_pct) else None,
+)
 
+# 2행: 현재 투자자산의 원가/손익
 m5, m6, m7, m8 = st.columns(4)
-m5.metric("성과기준자산", won(base))
-m6.metric("이후 순외부투입", won(deposits - withdrawals))
-m7.metric("기준일 이후 총성과", won(since_start), pct(since_start_pct) if is_num(since_start_pct) else None)
-m8.metric("배당·이자", won(income_total))
+m5.metric("투자자산 현재평가액", won(investment_value))
+m6.metric("현재보유 취득원가", won(investment_cost))
+m7.metric(
+    "누적 미실현손익",
+    won(unrealized_total),
+    pct(unrealized_pct) if is_num(unrealized_pct) else None,
+)
+m8.metric("10/1 이후 실현손익", won(realized_total))
+
+# 3행: 보조지표
+a1, a2 = st.columns(2)
+a1.metric("현금·예수금", won(cash_total))
+a2.metric("10/1 이후 배당·이자", won(income_total))
 
 st.caption(
-    "※ '기준일 이후 총성과'는 자금흐름 탭의 성과기준자산 + 이후 외부입출금과 현재 총자산을 비교합니다. "
-    "외부입금이 아직 특정 계좌에 배정되지 않았다면 앱에서는 '미배정 외부자금' 현금으로 표시합니다."
+    "※ 10/1 이후 순성과 = 현재 총자산 - (10/1 시작자산 + 이후 외부입금 - 이후 외부출금). "
+    "따라서 새로 모아 넣은 돈은 수익으로 잡히지 않습니다. 예: 130만원을 추가 투입하고 총자산이 150만원 늘면 순성과는 +20만원입니다."
+)
+st.caption(
+    "※ 누적 미실현손익은 각 자산의 실제 과거 취득원가 대비 현재 손익이므로 10/1 이전 손익도 포함합니다. "
+    "따라서 '10/1 이후 순성과'와 '미실현손익 + 실현손익'은 서로 같은 숫자일 필요가 없습니다."
 )
 
 if calc_warnings or quote_errors:
@@ -722,24 +749,31 @@ st.divider()
 # 9. 소유자 요약
 # =========================================================
 st.subheader("👥 소유자별 요약")
-owner_summary = (
-    holdings_df.groupby("소유자", dropna=False)
+
+owner_total = (
+    holdings_df.groupby("소유자", dropna=False)["현재평가액(KRW)"]
+    .sum()
+    .rename("현재총자산")
+)
+owner_invest = (
+    holdings_df.loc[holdings_df["상태"] != "CASH"]
+    .groupby("소유자", dropna=False)
     .agg(
-        현재자산=("현재평가액(KRW)", "sum"),
-        취득원가=("취득원가(KRW)", "sum"),
+        투자자산평가액=("현재평가액(KRW)", "sum"),
+        투자자산취득원가=("취득원가(KRW)", "sum"),
         미실현손익=("미실현손익(KRW)", "sum"),
     )
-    .reset_index()
 )
+owner_summary = owner_total.to_frame().join(owner_invest, how="left").fillna(0.0).reset_index()
 owner_realized = realized_df.groupby("소유자")["실현손익(KRW)"].sum() if not realized_df.empty else pd.Series(dtype=float)
-owner_summary["실현손익"] = owner_summary["소유자"].map(owner_realized).fillna(0.0)
+owner_summary["10/1이후실현손익"] = owner_summary["소유자"].map(owner_realized).fillna(0.0)
 owner_summary["미실현수익률"] = np.where(
-    owner_summary["취득원가"] > 0,
-    owner_summary["미실현손익"] / owner_summary["취득원가"] * 100,
+    owner_summary["투자자산취득원가"] > 0,
+    owner_summary["미실현손익"] / owner_summary["투자자산취득원가"] * 100,
     np.nan,
 )
 owner_show = owner_summary.copy()
-for c in ["현재자산", "취득원가", "미실현손익", "실현손익"]:
+for c in ["현재총자산", "투자자산평가액", "투자자산취득원가", "미실현손익", "10/1이후실현손익"]:
     owner_show[c] = owner_show[c].map(lambda x: f"{x:,.0f}")
 owner_show["미실현수익률"] = owner_summary["미실현수익률"].map(lambda x: f"{x:+.2f}%" if is_num(x) else "-")
 st.dataframe(owner_show, use_container_width=True, hide_index=True)
@@ -778,7 +812,7 @@ st.divider()
 # =========================================================
 left, right = st.columns(2)
 with left:
-    st.subheader("💰 매도 실현손익")
+    st.subheader("💰 10/1 이후 매도 실현손익")
     if realized_df.empty:
         st.info("아직 기준일 이후 매도 기록이 없습니다.")
     else:
@@ -788,7 +822,7 @@ with left:
         st.dataframe(rshow, use_container_width=True, hide_index=True)
 
 with right:
-    st.subheader("💵 배당·이자")
+    st.subheader("💵 10/1 이후 배당·이자")
     if income_df.empty:
         st.info("아직 배당·이자 거래 기록이 없습니다.")
     else:
