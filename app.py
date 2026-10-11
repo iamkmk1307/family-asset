@@ -574,6 +574,7 @@ def evaluate_current(states_serialized, cash_serialized):
 
         current_price = np.nan
         current_krw = np.nan
+        current_fx = np.nan
         quote_ccy = trade_ccy
         status = "OK"
 
@@ -590,13 +591,15 @@ def evaluate_current(states_serialized, cash_serialized):
 
                 fx_now = current_fx_to_krw(quote_ccy)
                 if is_num(fx_now):
-                    current_krw = qty * current_price * fx_now
+                    current_fx = float(fx_now)
+                    current_krw = qty * current_price * current_fx
                 else:
                     status = "FX_ERROR"
         else:
             # 티커 없는 자산: 원화 고정자산은 역사원가를 현재가로, 외화 RP 등은 수량×현재환율
             if trade_ccy == "KRW":
                 current_price = avg_native
+                current_fx = 1.0
                 current_krw = krw_cost
                 quote_ccy = "KRW"
             else:
@@ -604,7 +607,8 @@ def evaluate_current(states_serialized, cash_serialized):
                 quote_ccy = trade_ccy
                 fx_now = current_fx_to_krw(trade_ccy)
                 if is_num(fx_now):
-                    current_krw = qty * fx_now
+                    current_fx = float(fx_now)
+                    current_krw = qty * current_fx
                 else:
                     status = "FX_ERROR"
 
@@ -614,6 +618,34 @@ def evaluate_current(states_serialized, cash_serialized):
 
         unrealized = current_krw - krw_cost
         ret = unrealized / krw_cost * 100 if krw_cost > EPS else np.nan
+
+        # 손익 분해
+        # 외화로 직접 취득한 자산만 가격효과와 환율효과를 분리합니다.
+        # 가격손익 = (현재가격 - 평균취득가격) × 수량 × 평균취득환율
+        # 환차손익 = 현재가격 × 수량 × (현재환율 - 평균취득환율)
+        # 두 값의 합은 항상 총 미실현손익과 일치합니다.
+        trade_ccy_norm = "USD" if trade_ccy == "USDT" else trade_ccy
+        quote_ccy_norm = "USD" if quote_ccy == "USDT" else quote_ccy
+        can_split_fx = (
+            trade_ccy_norm not in {"", "KRW"}
+            and quote_ccy_norm == trade_ccy_norm
+            and is_num(current_fx)
+            and is_num(avg_fx)
+            and is_num(current_price)
+            and is_num(avg_native)
+        )
+
+        if can_split_fx:
+            price_pnl = (current_price - avg_native) * qty * avg_fx
+            fx_pnl = current_price * qty * (current_fx - avg_fx)
+            # 부동소수점 오차를 총손익에 맞춰 환차손익에서 보정
+            fx_pnl += unrealized - (price_pnl + fx_pnl)
+        else:
+            price_pnl = unrealized
+            fx_pnl = 0.0
+
+        price_ret = price_pnl / krw_cost * 100 if krw_cost > EPS else np.nan
+        fx_ret = fx_pnl / krw_cost * 100 if krw_cost > EPS else np.nan
 
         out.append({
             "소유자": owner,
@@ -625,11 +657,16 @@ def evaluate_current(states_serialized, cash_serialized):
             "보유수량": qty,
             "평균매수가": avg_native,
             "평균취득환율": avg_fx,
+            "현재환율": current_fx if is_num(current_fx) else (1.0 if quote_ccy == "KRW" else np.nan),
             "현재가": current_price,
             "시세통화": quote_ccy,
             "취득원가(KRW)": krw_cost,
             "현재평가액(KRW)": current_krw,
+            "가격손익(KRW)": price_pnl,
+            "환차손익(KRW)": fx_pnl,
             "미실현손익(KRW)": unrealized,
+            "가격손익률(%)": price_ret,
+            "환차손익률(%)": fx_ret,
             "수익률(%)": ret,
             "상태": status,
         })
@@ -651,11 +688,16 @@ def evaluate_current(states_serialized, cash_serialized):
             "보유수량": balance,
             "평균매수가": 1.0,
             "평균취득환율": fx if ccy != "KRW" else 1.0,
+            "현재환율": fx if is_num(fx) else np.nan,
             "현재가": 1.0,
             "시세통화": ccy,
             "취득원가(KRW)": current_krw,
             "현재평가액(KRW)": current_krw,
+            "가격손익(KRW)": 0.0,
+            "환차손익(KRW)": 0.0,
             "미실현손익(KRW)": 0.0,
+            "가격손익률(%)": 0.0,
+            "환차손익률(%)": 0.0,
             "수익률(%)": 0.0,
             "상태": "CASH",
         })
@@ -694,12 +736,16 @@ investment_value = float(holdings_df.loc[investment_mask, "현재평가액(KRW)"
 investment_cost = float(holdings_df.loc[investment_mask, "취득원가(KRW)"].sum())
 cash_total = current_total - investment_value
 
+price_pnl_total = float(holdings_df.loc[investment_mask, "가격손익(KRW)"].sum())
+fx_pnl_total = float(holdings_df.loc[investment_mask, "환차손익(KRW)"].sum())
 unrealized_total = float(holdings_df.loc[investment_mask, "미실현손익(KRW)"].sum())
 realized_total = float(realized_df["실현손익(KRW)"].sum()) if not realized_df.empty else 0.0
 income_total = float(income_df["금액(KRW)"].sum()) if not income_df.empty else 0.0
 
 period_performance = current_total - performance_base if performance_base > 0 else np.nan
 period_performance_pct = (period_performance / performance_base * 100) if performance_base > 0 else np.nan
+price_pnl_pct = (price_pnl_total / investment_cost * 100) if investment_cost > 0 else np.nan
+fx_pnl_pct = (fx_pnl_total / investment_cost * 100) if investment_cost > 0 else np.nan
 unrealized_pct = (unrealized_total / investment_cost * 100) if investment_cost > 0 else np.nan
 
 # 1행: 10/1 이후 가족 전체 자산 흐름
@@ -713,29 +759,44 @@ m4.metric(
     pct(period_performance_pct) if is_num(period_performance_pct) else None,
 )
 
-# 2행: 현재 투자자산의 원가/손익
-m5, m6, m7, m8 = st.columns(4)
+# 2행: 현재 투자자산 손익을 가격효과와 환율효과로 분리
+m5, m6, m7, m8, m9 = st.columns(5)
 m5.metric("투자자산 현재평가액", won(investment_value))
 m6.metric("현재보유 취득원가", won(investment_cost))
 m7.metric(
-    "누적 미실현손익",
+    "가격손익(환율제외)",
+    won(price_pnl_total),
+    pct(price_pnl_pct) if is_num(price_pnl_pct) else None,
+)
+m8.metric(
+    "환차손익",
+    won(fx_pnl_total),
+    pct(fx_pnl_pct) if is_num(fx_pnl_pct) else None,
+)
+m9.metric(
+    "총 미실현손익",
     won(unrealized_total),
     pct(unrealized_pct) if is_num(unrealized_pct) else None,
 )
-m8.metric("10/1 이후 실현손익", won(realized_total))
 
 # 3행: 보조지표
-a1, a2 = st.columns(2)
-a1.metric("현금·예수금", won(cash_total))
-a2.metric("10/1 이후 배당·이자", won(income_total))
+a1, a2, a3 = st.columns(3)
+a1.metric("10/1 이후 실현손익", won(realized_total))
+a2.metric("현금·예수금", won(cash_total))
+a3.metric("10/1 이후 배당·이자", won(income_total))
 
 st.caption(
     "※ 10/1 이후 순성과 = 현재 총자산 - (10/1 시작자산 + 이후 외부입금 - 이후 외부출금). "
     "따라서 새로 모아 넣은 돈은 수익으로 잡히지 않습니다. 예: 130만원을 추가 투입하고 총자산이 150만원 늘면 순성과는 +20만원입니다."
 )
 st.caption(
-    "※ 누적 미실현손익은 각 자산의 실제 과거 취득원가 대비 현재 손익이므로 10/1 이전 손익도 포함합니다. "
+    "※ 총 미실현손익은 각 자산의 실제 과거 취득원가 대비 현재 손익이므로 10/1 이전 손익도 포함합니다. "
     "따라서 '10/1 이후 순성과'와 '미실현손익 + 실현손익'은 서로 같은 숫자일 필요가 없습니다."
+)
+st.caption(
+    "※ 외화로 직접 취득한 자산은 총 미실현손익을 가격손익과 환차손익으로 분리합니다. "
+    "가격손익은 매수 당시 평균취득환율을 고정했을 때의 가격 변화 효과이고, 환차손익은 현재 가격 기준 환율 변화 효과입니다. "
+    "국내 원화거래 자산은 환차손익을 0원으로 두고 전체 손익을 가격손익으로 표시합니다."
 )
 
 if calc_warnings or quote_errors:
@@ -761,6 +822,8 @@ owner_invest = (
     .agg(
         투자자산평가액=("현재평가액(KRW)", "sum"),
         투자자산취득원가=("취득원가(KRW)", "sum"),
+        가격손익=("가격손익(KRW)", "sum"),
+        환차손익=("환차손익(KRW)", "sum"),
         미실현손익=("미실현손익(KRW)", "sum"),
     )
 )
@@ -773,7 +836,7 @@ owner_summary["미실현수익률"] = np.where(
     np.nan,
 )
 owner_show = owner_summary.copy()
-for c in ["현재총자산", "투자자산평가액", "투자자산취득원가", "미실현손익", "10/1이후실현손익"]:
+for c in ["현재총자산", "투자자산평가액", "투자자산취득원가", "가격손익", "환차손익", "미실현손익", "10/1이후실현손익"]:
     owner_show[c] = owner_show[c].map(lambda x: f"{x:,.0f}")
 owner_show["미실현수익률"] = owner_summary["미실현수익률"].map(lambda x: f"{x:+.2f}%" if is_num(x) else "-")
 st.dataframe(owner_show, use_container_width=True, hide_index=True)
@@ -792,17 +855,24 @@ if owner_filter != "전체":
 view = view.sort_values("현재평가액(KRW)", ascending=False)
 
 show = view[[
-    "소유자", "금융사", "계좌", "자산", "보유수량", "평균매수가", "평균취득환율",
-    "현재가", "취득원가(KRW)", "현재평가액(KRW)", "미실현손익(KRW)", "수익률(%)", "상태"
+    "소유자", "금융사", "계좌", "자산", "보유수량", "평균매수가", "현재가",
+    "평균취득환율", "현재환율", "취득원가(KRW)", "현재평가액(KRW)",
+    "가격손익(KRW)", "환차손익(KRW)", "미실현손익(KRW)", "수익률(%)", "상태"
 ]].copy()
 
 show["보유수량"] = show["보유수량"].map(lambda x: f"{x:,.8f}".rstrip("0").rstrip("."))
 show["평균매수가"] = show["평균매수가"].map(lambda x: f"{x:,.4f}" if is_num(x) else "-")
-show["평균취득환율"] = show["평균취득환율"].map(lambda x: f"{x:,.2f}" if is_num(x) else "-")
 show["현재가"] = show["현재가"].map(lambda x: f"{x:,.4f}" if is_num(x) else "-")
-for c in ["취득원가(KRW)", "현재평가액(KRW)", "미실현손익(KRW)"]:
+show["평균취득환율"] = show["평균취득환율"].map(lambda x: f"{x:,.2f}" if is_num(x) else "-")
+show["현재환율"] = show["현재환율"].map(lambda x: f"{x:,.2f}" if is_num(x) else "-")
+for c in ["취득원가(KRW)", "현재평가액(KRW)", "가격손익(KRW)", "환차손익(KRW)", "미실현손익(KRW)"]:
     show[c] = show[c].map(lambda x: f"{x:,.0f}")
 show["수익률(%)"] = show["수익률(%)"].map(lambda x: f"{x:+.2f}%" if is_num(x) else "-")
+show = show.rename(columns={
+    "가격손익(KRW)": "가격손익(환율제외)",
+    "환차손익(KRW)": "환차손익",
+    "미실현손익(KRW)": "총 미실현손익",
+})
 st.dataframe(show, use_container_width=True, hide_index=True, height=650)
 
 st.divider()
