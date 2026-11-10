@@ -454,15 +454,17 @@ with st.expander("계산 기준 보기", expanded=False):
 st.divider()
 
 # =========================================================
-# 탭
+# 탭 — 핵심 화면만 남김
 # =========================================================
-t1, t2, t3, t4, t5 = st.tabs(["현재 보유자산", "수동자산", "자금흐름", "주식모으기 월정산", "진단"])
+t1, t2, t3, t4 = st.tabs(["현재 보유자산", "수동자산", "자금흐름", "진단"])
 
 with t1:
+    st.caption("투자자산의 현재 보유현황입니다. 가격손익과 환차손익을 분리해서 봅니다.")
     if positions.empty:
         st.info("거래내역_최종에 자산을 입력하세요.")
     else:
-        show = positions.copy().sort_values(["소유자", "현재평가액(KRW)"], ascending=[True, False])
+        raw = positions.copy().sort_values(["소유자", "현재평가액(KRW)"], ascending=[True, False])
+        show = raw.copy()
         show["보유수량"] = show["보유수량"].map(qty_fmt)
         for c in ["평균매수가", "현재가", "평균취득환율"]:
             show[c] = show[c].map(lambda x: f"{x:,.4f}" if np.isfinite(x) else "-")
@@ -470,7 +472,6 @@ with t1:
             show[c] = show[c].map(lambda x: f"{x:,.0f}")
         show["수익률(%)"] = show["수익률(%)"].map(lambda x: f"{x:+.2f}%")
 
-        # 현재 보유현황에서 꼭 필요한 열만 남김. 현재환율/상태는 진단 탭에서 확인.
         cols = [
             "소유자", "계좌", "자산", "통화", "보유수량",
             "평균매수가", "현재가", "평균취득환율",
@@ -479,26 +480,64 @@ with t1:
             "총미실현손익(KRW)", "수익률(%)",
         ]
 
-        # 행 수만큼 표 높이를 늘려 세로 스크롤을 최소화한다.
-        table_height = min(max(120 + len(show) * 35, 480), 1200)
+        # 전체 합계 행 — 수량/평균값처럼 합계가 의미 없는 항목은 비움
+        total_row = {c: "" for c in cols}
+        total_row.update({
+            "소유자": "전체",
+            "자산": "합계",
+            "취득원가(KRW)": f"{investment_cost:,.0f}",
+            "현재평가액(KRW)": f"{investment_value:,.0f}",
+            "가격손익(KRW)": f"{price_pnl:,.0f}",
+            "환차손익(KRW)": f"{fx_pnl:,.0f}",
+            "총미실현손익(KRW)": f"{unrealized:,.0f}",
+            "수익률(%)": f"{(unrealized / investment_cost * 100 if investment_cost else 0):+.2f}%",
+        })
+        show_with_total = pd.concat([show[cols], pd.DataFrame([total_row])], ignore_index=True)
+
+        # 모든 행이 가급적 한 번에 보이도록 충분한 높이 확보
+        table_height = min(max(120 + len(show_with_total) * 35, 520), 1500)
         st.dataframe(
-            show[cols],
+            show_with_total,
             use_container_width=True,
             hide_index=True,
             height=table_height,
         )
 
 with t2:
-    st.caption("CMA·예수금·청약·전세·RP 등은 거래내역에 쓰지 않고 여기서 현재 잔액만 수정합니다.")
+    st.caption("CMA·예수금·청약·전세·RP 등은 거래장부가 아니라 '현재 잔액표'입니다. 잔액이 바뀌면 기존 행의 현재잔액만 수정합니다.")
     if manual_df.empty:
         st.info("수동자산_최종이 비어 있습니다.")
     else:
-        m = manual_df.copy()
+        raw_m = manual_df.copy().sort_values(["소유자", "현재평가액(KRW)"], ascending=[True, False])
+        m = raw_m.copy()
         m["현재잔액(원통화)"] = m["현재잔액(원통화)"].map(qty_fmt)
-        m["현재환율"] = m["현재환율"].map(lambda x: f"{x:,.2f}" if np.isfinite(x) else "-")
         for c in ["현재평가액(KRW)", "취득원가(KRW)", "평가손익(KRW)"]:
-            m[c] = m[c].map(lambda x: f"{x:,.0f}" if x else "-")
-        st.dataframe(m, use_container_width=True, hide_index=True)
+            m[c] = m[c].map(lambda x: f"{x:,.0f}" if abs(x) > 1e-12 else "-")
+
+        manual_cols = [
+            "소유자", "금융사/계좌", "자산", "통화",
+            "현재잔액(원통화)", "현재평가액(KRW)",
+            "취득원가(KRW)", "평가손익(KRW)",
+        ]
+        manual_cost = raw_m["취득원가(KRW)"].sum()
+        manual_pnl = raw_m["평가손익(KRW)"].sum()
+        manual_total = {c: "" for c in manual_cols}
+        manual_total.update({
+            "소유자": "전체",
+            "자산": "합계",
+            "현재평가액(KRW)": f"{manual_value:,.0f}",
+            "취득원가(KRW)": f"{manual_cost:,.0f}" if manual_cost else "-",
+            "평가손익(KRW)": f"{manual_pnl:,.0f}" if manual_cost else "-",
+        })
+        m_with_total = pd.concat([m[manual_cols], pd.DataFrame([manual_total])], ignore_index=True)
+
+        manual_height = min(max(120 + len(m_with_total) * 35, 480), 1300)
+        st.dataframe(
+            m_with_total,
+            use_container_width=True,
+            hide_index=True,
+            height=manual_height,
+        )
 
 with t3:
     st.caption("월급에서 새로 저축한 돈은 '저축', 실제로 자산 밖으로 뺀 돈만 '인출'로 기록합니다. 매수·매도는 여기 기록하지 않습니다.")
@@ -508,7 +547,8 @@ with t3:
         f = flows.copy()
         f["날짜"] = f["날짜"].dt.strftime("%Y-%m-%d")
         f["금액(KRW)"] = f["금액(KRW)"].map(lambda x: f"{x:,.0f}")
-        st.dataframe(f, use_container_width=True, hide_index=True)
+        flow_height = min(max(120 + len(f) * 35, 300), 900)
+        st.dataframe(f, use_container_width=True, hide_index=True, height=flow_height)
 
     if realized_rows:
         st.subheader("새 장부 이후 실현손익")
@@ -516,71 +556,16 @@ with t3:
         rr["날짜"] = pd.to_datetime(rr["날짜"]).dt.strftime("%Y-%m-%d")
         for c in ["매도대금(KRW)", "매도분취득원가(KRW)", "실현손익(KRW)"]:
             rr[c] = rr[c].map(lambda x: f"{x:,.0f}")
-        st.dataframe(rr, use_container_width=True, hide_index=True)
+        realized_height = min(max(120 + len(rr) * 35, 250), 800)
+        st.dataframe(rr, use_container_width=True, hide_index=True, height=realized_height)
 
 with t4:
-    st.subheader("주식모으기 월정산 도우미")
-    st.caption("매도가 없는 종목만 사용하세요. 핵심은 '이번 달'이 아니라 **마지막 장부 반영일 이후** 금액을 넣는 것입니다.")
-
-    if positions.empty:
-        st.info("먼저 거래내역_최종에 기준잔액이 필요합니다.")
-    else:
-        foreign = positions[(positions["통화"].isin(["USD", "USDT"])) & (positions["티커"] != "")].copy()
-        if foreign.empty:
-            st.info("정산할 외화 종목이 없습니다.")
-        else:
-            foreign["선택"] = foreign["소유자"] + " | " + foreign["계좌"] + " | " + foreign["자산"]
-            choice = st.selectbox("종목", foreign["선택"].tolist())
-            base = foreign.loc[foreign["선택"] == choice].iloc[0]
-            last_date = pd.to_datetime(base["마지막반영일"]).date() if pd.notna(base["마지막반영일"]) else None
-
-            st.write(f"**장부 마지막 반영일:** {last_date if last_date else '-'}")
-            st.write(f"**장부 보유수량:** {qty_fmt(base['보유수량'])}주 / **장부 평균매수가:** {base['평균매수가']:,.4f} {base['통화']}")
-
-            c1, c2, c3 = st.columns(3)
-            broker_qty = c1.number_input("증권사 현재 총 보유수량", min_value=0.0, value=float(base["보유수량"]), step=0.0001, format="%.8f")
-            broker_avg = c2.number_input(f"증권사 현재 평균매수가 ({base['통화']})", min_value=0.0, value=float(base["평균매수가"]), step=0.0001, format="%.8f")
-            krw_spent = c3.number_input("마지막 장부 반영일 이후 실제 원화 매수총액", min_value=0.0, value=0.0, step=1000.0, format="%.0f")
-
-            added_qty = broker_qty - float(base["보유수량"])
-            current_native_cost = broker_qty * broker_avg
-            old_native_cost = float(base["원통화취득원가"])
-            added_native_cost = current_native_cost - old_native_cost
-            added_avg = added_native_cost / added_qty if added_qty > 0 and added_native_cost > 0 else np.nan
-            implied_fx = krw_spent / added_native_cost if krw_spent > 0 and added_native_cost > 0 else np.nan
-
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("추가수량", f"{added_qty:,.6f}")
-            m2.metric("추가 매수금액", f"{added_native_cost:,.2f} {base['통화']}" if np.isfinite(added_native_cost) else "-")
-            m3.metric("기간 평균매수가", f"{added_avg:,.4f}" if np.isfinite(added_avg) else "-")
-            m4.metric("기간 평균취득환율", f"{implied_fx:,.2f}원" if np.isfinite(implied_fx) else "-")
-
-            if added_qty <= 0 or added_native_cost <= 0:
-                st.warning("현재 잔고가 장부 기준보다 늘지 않았습니다. 매도가 있었거나 입력값을 확인하세요.")
-            elif np.isfinite(implied_fx) and base["통화"] in ("USD", "USDT") and not (1000 <= implied_fx <= 2200):
-                st.error("취득환율이 비정상 범위입니다. '원화 매수총액'의 기간이 장부 마지막 반영일 이후와 일치하는지 확인하세요.")
-            elif krw_spent > 0:
-                st.success("기간이 맞습니다. 아래 한 줄을 거래내역_최종 맨 아래에 매수로 추가하면 됩니다.")
-                ready = pd.DataFrame([{
-                    "날짜": datetime.now(KST).date().isoformat(),
-                    "소유자": base["소유자"],
-                    "계좌": base["계좌"],
-                    "구분": "매수",
-                    "자산": base["자산"],
-                    "티커": base["티커"],
-                    "통화": base["통화"],
-                    "수량": round(added_qty, 8),
-                    "체결단가": round(added_avg, 8) if np.isfinite(added_avg) else "",
-                    "실제원화금액(KRW)": round(krw_spent),
-                }])
-                st.dataframe(ready, use_container_width=True, hide_index=True)
-
-with t5:
     st.subheader("데이터 진단")
-    st.write("새 구조에서는 현금증감·연결ID·환전 원장을 사용하지 않습니다.")
-    st.write("- 거래내역_최종: 투자자산 매수/매도만")
-    st.write("- 자금흐름_최종: 시작자산/저축/인출만")
+    st.write("새 구조에서는 현금증감·연결ID·환전 원장·주식모으기 도우미를 사용하지 않습니다.")
+    st.write("- 거래내역_최종: 투자자산 기준잔액 / 매수 / 매도")
+    st.write("- 자금흐름_최종: 시작자산 / 저축 / 인출")
     st.write("- 수동자산_최종: CMA·예수금·청약·전세·RP 등 현재 잔액")
+    st.info("자동매수 종목을 장기간 미반영하면 현재 총자산과 순수익이 실제와 달라집니다. 필요할 때 누적 추가수량·평균단가·실제 원화투입액을 계산해 매수 1행으로 합산 반영하세요.")
 
     if not positions.empty:
         errors = positions[positions["상태"] != "OK"]
