@@ -5,7 +5,6 @@ from zoneinfo import ZoneInfo
 import gspread
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 import yfinance as yf
 from google.oauth2.service_account import Credentials
@@ -416,25 +415,41 @@ total_assets = investment_value + manual_value
 performance_since_start = total_assets - (start_asset + net_external)
 
 # =========================================================
-# 상단 요약
+# 상단 핵심 요약 — 메인 화면에는 꼭 필요한 숫자만
 # =========================================================
-r1 = st.columns(4)
-r1[0].metric("현재 총자산", won(total_assets))
-r1[1].metric("10/1 시작자산", won(start_asset))
-r1[2].metric("이후 순저축", won(net_external), help="저축 합계 - 인출 합계")
-r1[3].metric("10/1 이후 순성과", won(performance_since_start), delta=pct(performance_since_start / (start_asset + net_external) * 100) if (start_asset + net_external) else None)
+summary = st.columns(4)
+summary[0].metric("현재 총자산", won(total_assets))
+summary[1].metric(
+    "10/1 이후 순수익",
+    won(performance_since_start),
+    delta=pct(performance_since_start / (start_asset + net_external) * 100)
+    if (start_asset + net_external) else None,
+    help="현재 총자산 - (10/1 시작자산 + 이후 저축 - 이후 인출)",
+)
+summary[2].metric(
+    "현재 보유 미실현손익",
+    won(unrealized),
+    delta=pct(unrealized / investment_cost * 100) if investment_cost else None,
+    help="현재 보유 투자자산의 평가액 - 취득원가",
+)
+summary[3].metric(
+    "현재 보유 환차손익",
+    won(fx_pnl),
+    help="USD/USDT 직접투자 자산에서 환율 변화로 발생한 미실현손익",
+)
 
-r2 = st.columns(5)
-r2[0].metric("투자자산 평가액", won(investment_value))
-r2[1].metric("현재보유 취득원가", won(investment_cost))
-r2[2].metric("가격손익", won(price_pnl))
-r2[3].metric("환차손익", won(fx_pnl))
-r2[4].metric("총 미실현손익", won(unrealized), delta=pct(unrealized / investment_cost * 100) if investment_cost else None)
+st.caption(
+    f"10/1 시작자산 {won(start_asset)} · 이후 순저축 {won(net_external)} · "
+    f"현재 보유 가격손익 {won(price_pnl)}"
+)
 
-r3 = st.columns(3)
-r3[0].metric("수동자산", won(manual_value))
-r3[1].metric("새 장부 이후 실현손익", won(realized_total))
-r3[2].metric("현재 USD/KRW", f"{current_usdkrw():,.2f}" if np.isfinite(current_usdkrw()) else "조회 실패")
+with st.expander("계산 기준 보기", expanded=False):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("10/1 시작자산", won(start_asset))
+    c2.metric("이후 순저축", won(net_external))
+    c3.metric("새 장부 이후 실현손익", won(realized_total))
+    usdkrw_now = current_usdkrw()
+    c4.metric("현재 USD/KRW", f"{usdkrw_now:,.2f}" if np.isfinite(usdkrw_now) else "조회 실패")
 
 st.divider()
 
@@ -447,24 +462,31 @@ with t1:
     if positions.empty:
         st.info("거래내역_최종에 자산을 입력하세요.")
     else:
-        show = positions.copy()
+        show = positions.copy().sort_values(["소유자", "현재평가액(KRW)"], ascending=[True, False])
         show["보유수량"] = show["보유수량"].map(qty_fmt)
-        for c in ["평균매수가", "현재가", "평균취득환율", "현재환율"]:
+        for c in ["평균매수가", "현재가", "평균취득환율"]:
             show[c] = show[c].map(lambda x: f"{x:,.4f}" if np.isfinite(x) else "-")
         for c in ["취득원가(KRW)", "현재평가액(KRW)", "가격손익(KRW)", "환차손익(KRW)", "총미실현손익(KRW)"]:
             show[c] = show[c].map(lambda x: f"{x:,.0f}")
         show["수익률(%)"] = show["수익률(%)"].map(lambda x: f"{x:+.2f}%")
-        cols = [
-            "소유자","계좌","자산","통화","보유수량","평균매수가","현재가",
-            "평균취득환율","현재환율","취득원가(KRW)","현재평가액(KRW)",
-            "가격손익(KRW)","환차손익(KRW)","총미실현손익(KRW)","수익률(%)","상태"
-        ]
-        st.dataframe(show[cols], use_container_width=True, hide_index=True)
 
-        chart_df = positions.groupby("자산", as_index=False)["현재평가액(KRW)"].sum().sort_values("현재평가액(KRW)", ascending=False)
-        if not chart_df.empty:
-            fig = px.bar(chart_df.head(15), x="자산", y="현재평가액(KRW)", title="투자자산 평가액 상위 15개")
-            st.plotly_chart(fig, use_container_width=True)
+        # 현재 보유현황에서 꼭 필요한 열만 남김. 현재환율/상태는 진단 탭에서 확인.
+        cols = [
+            "소유자", "계좌", "자산", "통화", "보유수량",
+            "평균매수가", "현재가", "평균취득환율",
+            "취득원가(KRW)", "현재평가액(KRW)",
+            "가격손익(KRW)", "환차손익(KRW)",
+            "총미실현손익(KRW)", "수익률(%)",
+        ]
+
+        # 행 수만큼 표 높이를 늘려 세로 스크롤을 최소화한다.
+        table_height = min(max(120 + len(show) * 35, 480), 1200)
+        st.dataframe(
+            show[cols],
+            use_container_width=True,
+            hide_index=True,
+            height=table_height,
+        )
 
 with t2:
     st.caption("CMA·예수금·청약·전세·RP 등은 거래내역에 쓰지 않고 여기서 현재 잔액만 수정합니다.")
